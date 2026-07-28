@@ -48,3 +48,64 @@ tags                             # ctags index
 *.log                            # log files
 /tests_output/                   # custom test output directory
 /samples_output/                 # custom sample output directory
+
+#6. xmake
+# ==========================================
+# Xmake Build Output & Cache
+# ==========================================
+# Default build directory where compiled binaries and object files are placed
+build/
+build_*/
+
+# Xmake internal cache, local configuration, and temporary files
+.xmake/
+.xmake-cache/
+
+# Generated LSP compilation database (e.g., via `xmake project -k compile_commands`)
+compile_commands.json
+
+# ==========================================
+# C / C++ Build Artifacts
+# ==========================================
+# Object files
+*.o
+*.obj
+*.elf
+
+# Static and Dynamic Libraries
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# Debugging symbols and precompiled headers
+*.pdb
+*.idb
+*.dSYM/
+*.gch
+*.pch
+
+
+# Visual Studio project files
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# Xcode project files (generated via `xmake project -k xcode`)
+*.xcodeproj/
+*.xcworkspace/
+
+# ==========================================
+# IDEs & System Files
+# ==========================================
+# Editor configurations (uncomment if you don't share IDE settings in repository)
+.vscode/
+.idea/
+
+# OS specific files
+.DS_Store
+Thumbs.db

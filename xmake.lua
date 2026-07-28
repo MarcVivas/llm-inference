@@ -1,23 +1,18 @@
--- 1. MUST be at line 1 (root scope)
 add_requires("nlohmann_json")
 
--- 2. Target block
 target("llm_engine")
     set_kind("binary")
     set_languages("c++20")
 
-    -- Host C++ files
     add_files("src/*.cpp")
     add_packages("nlohmann_json")
 
-    -- Auto-detect vendor environment (AMD ROCm vs NVIDIA CUDA)
     on_load(function (target)
         import("lib.detect.find_tool")
 
         local hipconfig = find_tool("hipconfig")
         local nvcc = find_tool("nvcc")
 
-        -- Check HIP_PLATFORM environment variable
         local hip_platform = os.getenv("HIP_PLATFORM")
         if not hip_platform and hipconfig then
             try { function()
@@ -28,7 +23,6 @@ target("llm_engine")
             end }
         end
 
-        -- Fallback detection
         if not hip_platform then
             if nvcc then
                 hip_platform = "nvidia"
@@ -37,9 +31,6 @@ target("llm_engine")
             end
         end
 
-        -------------------------------------------------------------------
-        -- NVIDIA CUDA Configuration
-        -------------------------------------------------------------------
         if hip_platform == "nvidia" or hip_platform == "nvcc" then
             target:set("toolset", "cc", "nvcc")
             target:set("toolset", "cxx", "nvcc")
@@ -52,14 +43,13 @@ target("llm_engine")
                 target:add("includedirs", path.join(cuda_path, "include"))
             end
 
-            -- Tell nvcc to treat .hip.cpp files as CUDA sources (.cu)
+            if os.isdir("/tmp/hip/include") then
+                target:add("includedirs", "/tmp/hip/include")
+            end
+
             target:add("files", "src/kernels/*.hip.cpp", {
                 sourcekind = "cu"
             })
-
-        -------------------------------------------------------------------
-        -- AMD ROCm Configuration
-        -------------------------------------------------------------------
         else
             target:set("toolset", "cc", "clang@hipcc")
             target:set("toolset", "cxx", "clang@hipcc")
