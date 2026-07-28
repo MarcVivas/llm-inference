@@ -2,6 +2,8 @@
     files = {
         "src/main.cpp"
     },
+    depfiles = "build/.objs/llm_engine/linux/x86_64/release/src/main.cpp.o: src/main.cpp   include/gpu_utils.hpp include/model_config.hpp   include/kernels/kernels.hpp\
+",
     depfiles_format = "gcc",
     values = {
         "hipcc",
@@ -14,7 +16,5 @@
             "-D__HIP_PLATFORM_AMD__",
             "-D__HIPCC__"
         }
-    },
-    depfiles = "build/.objs/llm_engine/linux/x86_64/release/src/main.cpp.o: src/main.cpp   include/gpu_utils.hpp include/model_config.hpp   include/kernels/kernels.hpp\
-"
+    }
 }

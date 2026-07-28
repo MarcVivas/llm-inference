@@ -2,6 +2,8 @@
     files = {
         "src/kernels/kernels.hip.cpp"
     },
+    depfiles = "build/.objs/llm_engine/linux/x86_64/release/src/kernels/kernels.hip.cpp.o:   src/kernels/kernels.hip.cpp include/kernels/kernels.hpp   include/gpu_utils.hpp\
+",
     depfiles_format = "gcc",
     values = {
         "hipcc",
@@ -17,7 +19,5 @@
             "hip",
             "--offload-arch=native"
         }
-    },
-    depfiles = "build/.objs/llm_engine/linux/x86_64/release/src/kernels/kernels.hip.cpp.o:   src/kernels/kernels.hip.cpp include/kernels/kernels.hpp   include/gpu_utils.hpp\
-"
+    }
 }

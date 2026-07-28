@@ -1,5 +1,7 @@
+-- 1. MUST be at line 1 (root scope)
 add_requires("nlohmann_json")
 
+-- 2. Target block
 target("llm_engine")
     set_kind("binary")
     set_languages("c++20")
@@ -26,7 +28,7 @@ target("llm_engine")
             end }
         end
 
-        -- If HIP_PLATFORM is unset, fallback to auto-detecting installed toolset
+        -- Fallback detection
         if not hip_platform then
             if nvcc then
                 hip_platform = "nvidia"
@@ -39,36 +41,32 @@ target("llm_engine")
         -- NVIDIA CUDA Configuration
         -------------------------------------------------------------------
         if hip_platform == "nvidia" or hip_platform == "nvcc" then
-            -- Set compiler to NVIDIA nvcc
             target:set("toolset", "cc", "nvcc")
             target:set("toolset", "cxx", "nvcc")
             target:set("toolset", "ld", "nvcc")
 
             target:add("defines", "__HIP_PLATFORM_NVIDIA__", "__HIPCC__")
 
-            -- Add CUDA include directory
             local cuda_path = os.getenv("CUDA_PATH") or os.getenv("CUDA_HOME") or "/usr/local/cuda"
             if os.isdir(cuda_path) then
                 target:add("includedirs", path.join(cuda_path, "include"))
             end
 
-            -- Compile kernel files using NVCC CUDA mode (-x cu)
+            -- Tell nvcc to treat .hip.cpp files as CUDA sources (.cu)
             target:add("files", "src/kernels/*.hip.cpp", {
-                cxxflags = {"-x", "cu"}
+                sourcekind = "cu"
             })
 
         -------------------------------------------------------------------
         -- AMD ROCm Configuration
         -------------------------------------------------------------------
         else
-            -- Set compiler to hipcc (Clang)
             target:set("toolset", "cc", "clang@hipcc")
             target:set("toolset", "cxx", "clang@hipcc")
             target:set("toolset", "ld", "clang@hipcc")
 
             target:add("defines", "__HIP_PLATFORM_AMD__", "__HIPCC__")
 
-            -- Add ROCm include directory
             local rocm_path = os.getenv("ROCM_PATH")
             if not rocm_path and hipconfig then
                 try { function()
@@ -85,7 +83,6 @@ target("llm_engine")
                 target:add("includedirs", inc_dir)
             end
 
-            -- Compile kernel files using ROCm HIP mode (-x hip)
             target:add("files", "src/kernels/*.hip.cpp", {
                 cxxflags = {"-x hip", "--offload-arch=native"}
             })
@@ -93,3 +90,4 @@ target("llm_engine")
 
         target:add("includedirs", "include")
     end)
+target_end()
