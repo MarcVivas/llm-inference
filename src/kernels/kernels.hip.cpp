@@ -1,4 +1,5 @@
-#include "kernels.hpp"
+#include <hip/hip_runtime.h>
+#include "kernels/kernels.hpp"
 #include "gpu_utils.hpp"
 
 // CUDA/HIP Kernel executing on GPU threads

@@ -1,0 +1,7 @@
+{
+    nlohmann_json = {
+        version = "3.12.0",
+        __enabled = true,
+        __requirestr = "nlohmann_json"
+    }
+}
