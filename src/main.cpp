@@ -1,11 +1,21 @@
+#include <cstdio>
 #include <iostream>
 #include <vector>
 #include "gpu_utils.hpp"
+#include "memory_mapped_file.hpp"
 #include "model_config.hpp"
+#include "model.hpp"
 #include "kernels/kernels.hpp"
 #include <print>
+#include <filesystem>
 
-int main() {
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        std::println(stderr, "Usage: {} <path_to_model.bin>", argv[0]);
+        return 1;
+    }
+
+    std::filesystem::path model_path = argv[1];
     
     std::println("=== Welcome to ROCm LLM Inference Engine ===");
 
@@ -18,9 +28,11 @@ int main() {
     std::println("[GPU] Total VRAM: {:.1f} GB", static_cast<double>(props.totalGlobalMem) / (1024 * 1024 * 1024));
 
     // Load Model Configuration
-    ModelConfig config;
-    std::println( "[Model] Config initialized. Hidden Dim:{}, Layers:{}",config.dim, config.num_layers);
+    MemoryMappedFile file(model_path);
 
+    Model model = Model(file);
+    model.config.print_model_config();
+    
     // 3. Test GPU Memory Allocation & Kernel Execution
     const int N = 1024;
     size_t bytes = N * sizeof(float);
@@ -50,6 +62,5 @@ int main() {
     HIP_CHECK(hipFree(d_b));
     HIP_CHECK(hipFree(d_c));
 
-    std::cout << "=== Skeleton Verification Successful ===" << std::endl;
     return 0;
 }
