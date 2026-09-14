@@ -2,7 +2,7 @@ add_requires("nlohmann_json")
 
 target("llm_engine")
     set_kind("binary")
-    set_languages("c++20")
+    set_languages("c++23")
 
     add_files("src/*.cpp")
     add_packages("nlohmann_json")

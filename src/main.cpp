@@ -3,22 +3,23 @@
 #include "gpu_utils.hpp"
 #include "model_config.hpp"
 #include "kernels/kernels.hpp"
+#include <print>
 
 int main() {
-    std::cout << "=== ROCm LLM Inference Engine Skeleton ===" << std::endl;
+    
+    std::println("=== Welcome to ROCm LLM Inference Engine ===");
 
-    // 1. Query AMD GPU Properties
+    // Query AMD GPU Properties
     int device_id = 0;
     hipDeviceProp_t props;
     HIP_CHECK(hipGetDeviceProperties(&props, device_id));
 
-    std::cout << "[GPU] Device Name: " << props.name << std::endl;
-    std::cout << "[GPU] Total VRAM: " << props.totalGlobalMem / (1024 * 1024 * 1024) << " GB" << std::endl;
+    std::println("[GPU] Device Name: {}", props.name);
+    std::println("[GPU] Total VRAM: {:.1f} GB", static_cast<double>(props.totalGlobalMem) / (1024 * 1024 * 1024));
 
-    // 2. Load Model Configuration
+    // Load Model Configuration
     ModelConfig config;
-    std::cout << "[Model] Config initialized. Hidden Dim: " << config.dim
-              << ", Layers: " << config.num_layers << std::endl;
+    std::println( "[Model] Config initialized. Hidden Dim:{}, Layers:{}",config.dim, config.num_layers);
 
     // 3. Test GPU Memory Allocation & Kernel Execution
     const int N = 1024;

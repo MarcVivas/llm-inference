@@ -109,3 +109,9 @@ compile_commands.json
 # OS specific files
 .DS_Store
 Thumbs.db
+.venv/
+__pycache__/
+*.bin
+tests/fixtures/
+
+model_config.json
