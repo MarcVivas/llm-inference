@@ -8,9 +8,8 @@ compatible with the C++/HIP inference runner.
 import argparse
 import struct
 from pathlib import Path
-from turtle import hideturtle
 import numpy as np
-from python.model_config import ModelConfig
+from model_config import ModelConfig
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
@@ -20,8 +19,8 @@ from transformers import AutoConfig, AutoModelForCausalLM
 def export_model_weights(model_config, model_id_or_path, out_file):
     """
     This function exports a weights.bin file containing the model weights and config
-    Header: 4 bytes ('QWEN') 7 uint32_t (28 bytes) and 2 f32 values (8 bytes)
-    Total bytes header: 40 bytes
+    Header: 4 bytes ('QWEN') 8 uint32_t (28 bytes) and 2 f32 values (8 bytes)
+    Total bytes header: 44 bytes
     Then you have the model weights as f16 in the order of the network layers.
     """
     print("Loading model tensors into host memory (casting to FP16)...")
@@ -36,10 +35,10 @@ def export_model_weights(model_config, model_id_or_path, out_file):
 
     # Binary file header format:
     # Magic Number: 'Q','W','E','N' (4 bytes)
-    # Header format: 7 uint32 integers, 2 float32 values
+    # Header format: 8 uint32 integers, 2 float32 values
     magic = b"QWEN"
     header_bytes = struct.pack(
-        "<4sIIIIIIIff",
+        "<4sIIIIIIIIff",
         magic,
         model_config.vocab_size,
         model_config.hidden_size,
@@ -48,6 +47,7 @@ def export_model_weights(model_config, model_id_or_path, out_file):
         model_config.num_kv_heads,
         model_config.head_dim,
         model_config.intermediate_size,
+        model_config.max_seq_len,
         model_config.rms_norm_eps,
         model_config.rope_theta,
     )

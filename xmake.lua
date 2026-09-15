@@ -1,4 +1,5 @@
 add_requires("nlohmann_json")
+add_rules("plugin.compile_commands.autoupdate", {outputdir = "."})
 
 target("llm_engine")
     set_kind("binary")

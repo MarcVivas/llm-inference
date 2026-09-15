@@ -9,6 +9,7 @@ class ModelConfig:
         self.intermediate_size = getattr(config, "intermediate_size", 6912)
         self.vocab_size = getattr(config, "vocab_size", 152064)
         self.head_dim = getattr(config, "head_dim", self.hidden_size // self.num_heads)
+        self.max_seq_len = getattr(config, "max_position_embeddings", 2048)
         self.rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
         self.rope_theta = getattr(config, "rope_theta", 1000000.0)
 

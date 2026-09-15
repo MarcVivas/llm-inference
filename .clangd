@@ -1,0 +1,12 @@
+CompileFlags:
+  # Tell clangd to interpret commands using clang++ instead of the unrecognized hipcc
+  Compiler: clang++
+
+  # Strip flags that cause clangd's syntax parser to choke
+  Remove:
+    - --offload-arch=native
+
+  # Ensure clangd knows where ROCm headers and device libraries are
+  Add:
+    - --rocm-path=/opt/rocm
+    - -D__HIP_PLATFORM_AMD__=1
