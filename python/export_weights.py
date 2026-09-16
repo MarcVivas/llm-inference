@@ -5,13 +5,15 @@ Extracts and converts Qwen/Qwen-style safetensors weights to FP16 flat binary fo
 compatible with the C++/HIP inference runner.
 """
 
-import argparse
 import struct
 from pathlib import Path
 import numpy as np
 from model_config import ModelConfig
+from tokenizer import get_tokenizer
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
+import tempfile
+import argparse
 
 
 
@@ -33,6 +35,19 @@ def export_model_weights(model_config, model_id_or_path, out_file):
     )
     state_dict = model.state_dict()
 
+    tokenizer = get_tokenizer(model_id_or_path)
+    try:
+        # Fast tokenizers can serialize to string directly from memory
+        tok_json_bytes = tokenizer._tokenizer.to_str().encode("utf-8")
+    except AttributeError:
+        # Fallback if _tokenizer is not directly exposed
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tokenizer.save_pretrained(tmp_dir)
+            tok_json_bytes = (Path(tmp_dir) / "tokenizer.json").read_bytes()
+
+    print(f"Serialized Tokenizer JSON size: {len(tok_json_bytes) / 1024:.2f} KB")
+
+            
     # Binary file header format:
     # Magic Number: 'Q','W','E','N' (4 bytes)
     # Header format: 8 uint32 integers, 2 float32 values
@@ -62,11 +77,22 @@ def export_model_weights(model_config, model_id_or_path, out_file):
     with open(out_file, "wb") as f:
         f.write(header_bytes)
 
-        # 1. Token Embeddings
+        f.write(struct.pack("<I", len(tok_json_bytes)))
+        f.write(tok_json_bytes)
+  
+        # Align to 64-byte boundary for GPU VRAM DMA
+        current_pos = f.tell()
+        pad_len = (64 - (current_pos % 64)) % 64
+        if pad_len > 0:
+            f.write(b"\x00" * pad_len)
+
+        # Token Embeddings
         embed_name = "model.embed_tokens.weight"
         write_tensor(f, state_dict[embed_name], embed_name)
 
-        # 2. Transformer Blocks
+      
+
+        #  Transformer Blocks
         for i in range(model_config.num_layers):
             pfx = f"model.layers.{i}."
             print(f"\n--- Exporting Layer {i} ---")
@@ -127,14 +153,15 @@ def export_model(model_id_or_path: str, output_path: str):
 
     # Export weights
     export_model_weights(model_config, model_id_or_path, out_file)
-    
+
 
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export Hugging Face weights to raw FP16 binary.")
     parser.add_argument("--model", type=str, required=True, help="Hugging Face repo ID or local directory")
-    parser.add_argument("--output", type=str, default="../weights.bin", help="Output destination binary path")
+    parser.add_argument("--output", type=str, default="weights.bin", help="Output destination binary path")
     args = parser.parse_args()
 
+    tokenizer = get_tokenizer(args.model)
     export_model(args.model, args.output)

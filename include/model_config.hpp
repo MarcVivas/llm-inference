@@ -31,7 +31,9 @@ struct ModelConfig {
         }
 
         void import_model_config(const std::span<const std::byte> bytes){
-
+            if (bytes.size() < sizeof(ModelConfig)) {
+                throw std::runtime_error("Buffer too small for ModelConfig header (expected 44 bytes)");
+            }
             std::memcpy(this, bytes.data(), sizeof(ModelConfig));
 
             if(std::string_view(this->magic, 4) != "QWEN") {

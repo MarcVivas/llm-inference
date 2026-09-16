@@ -10,7 +10,8 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
+from tokenizer import get_tokenizer
 
 
 def dump_tensor(tensor: torch.Tensor, output_path: Path, name: str):
@@ -91,7 +92,7 @@ def run_reference(model_id: str, prompt: str, out_dir: str):
     fixtures_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading tokenizer & model: {model_id}")
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    tokenizer = get_tokenizer(model_id)
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         torch_dtype=torch.float16,
@@ -117,7 +118,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate PyTorch activation ground truth for test_kernels.")
     parser.add_argument("--model", type=str, required=True, help="Hugging Face model ID or path")
     parser.add_argument("--prompt", type=str, default="Inference engineering is", help="Reference test prompt")
-    parser.add_argument("--output-dir", type=str, default="../tests/fixtures", help="Directory to store .bin dumps")
+    parser.add_argument("--output-dir", type=str, default="./tests/reference", help="Directory to store .bin dumps")
     args = parser.parse_args()
 
     run_reference(args.model, args.prompt, args.output_dir)

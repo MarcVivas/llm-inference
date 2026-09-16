@@ -1,2 +1,12 @@
-// Vector Addition Kernel (Dummy test kernel to verify ROCm execution)
-void launch_vector_add(const float* d_a, const float* d_b, float* d_c, int n);
+#pragma once
+#include <hip/hip_fp16.h>
+#include <cstdint>
+#include <cstddef>
+
+void launch_embedding_lookup(
+    const int32_t* d_input_tokens, 
+    const __half* d_embed_table, 
+    __half* d_output_embeddings, 
+    size_t seq_len, 
+    size_t hidden_size
+);

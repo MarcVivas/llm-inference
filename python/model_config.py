@@ -30,6 +30,7 @@ class ModelConfig:
             "num_key_value_heads": self.num_kv_heads,
             "head_dim": self.head_dim,
             "intermediate_size": self.intermediate_size,
+            "max_seq_len": self.max_seq_len,
             "rms_norm_eps": self.rms_norm_eps,
             "rope_theta": self.rope_theta,
         }

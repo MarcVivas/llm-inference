@@ -1,7 +1,6 @@
 #pragma once
 
-#include "hip/driver_types.h"
-#include "hip/hip_runtime.h"
+#include <hip/hip_runtime.h>
 #include "model_config.hpp"
 #include <hip/hip_fp16.h>
 #include <stdexcept>
@@ -55,7 +54,7 @@ struct DeviceWeights{
     // Unembedding layer [vocab_size, hidden_size]
     const __half* lm_head = nullptr;
 
-    DeviceWeights(ModelConfig &config, const __half* host_weights, const size_t total_bytes){
+    DeviceWeights(const ModelConfig &config, const __half* host_weights, const size_t total_bytes){
         this->total_bytes = total_bytes;
         // Allocate 1 monolithic VRAM block
         auto err = hipMalloc(&this->raw_device_buffer, total_bytes);

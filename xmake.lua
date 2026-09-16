@@ -1,13 +1,33 @@
-add_requires("nlohmann_json")
+add_requires("doctest")
 add_rules("plugin.compile_commands.autoupdate", {outputdir = "."})
+
+target("tokenizers_c_lib")
+    set_kind("phony")
+    on_build(function (target)
+        print("Checking/building tokenizers Rust library...")
+        -- Run cargo directly inside the rust subdirectory (no import or os.cd needed)
+        os.vrunv("cargo", {"build", "--release"}, {curdir = "3rdparty/tokenizers-cpp/rust"})
+    end)
 
 target("llm_engine")
     set_kind("binary")
     set_languages("c++23")
 
-    add_files("src/*.cpp")
-    add_packages("nlohmann_json")
+    add_deps("tokenizers_c_lib")
 
+    add_files("src/*.cpp")
+    add_files("3rdparty/tokenizers-cpp/src/huggingface_tokenizer.cc")
+
+    
+    add_includedirs("include")
+    add_includedirs("3rdparty/tokenizers-cpp/include")
+
+    add_linkdirs("3rdparty/tokenizers-cpp/rust/target/release")
+    add_links("tokenizers_c")
+
+    add_syslinks("pthread", "dl")
+
+    
     on_load(function (target)
         import("lib.detect.find_tool")
 
@@ -79,6 +99,41 @@ target("llm_engine")
             })
         end
 
-        target:add("includedirs", "include")
     end)
 target_end()
+
+
+target("test_kernels")
+    set_kind("binary")
+    set_languages("c++23")
+    add_packages("doctest")
+
+    add_deps("tokenizers_c_lib")
+
+    add_files("tests/test_main.cpp")
+    add_files("tests/test_embedding.cpp")
+    add_files("src/kernels/*.hip.cpp")
+    add_files("3rdparty/tokenizers-cpp/src/huggingface_tokenizer.cc")
+
+    add_includedirs("include")
+    add_includedirs("tests")
+    add_includedirs("3rdparty/tokenizers-cpp/include")
+
+    add_linkdirs("3rdparty/tokenizers-cpp/rust/target/release")
+    add_links("tokenizers_c")
+    add_syslinks("pthread", "dl")
+
+    add_packages("nlohmann_json")
+
+    -- Reuse your HIP toolset setup
+    set_toolset("cc", "clang@hipcc")
+    set_toolset("cxx", "clang@hipcc")
+    set_toolset("ld", "clang@hipcc")
+    add_defines("__HIP_PLATFORM_AMD__", "__HIPCC__")
+
+    local rocm_path = os.getenv("ROCM_PATH") or "/opt/rocm"
+    add_includedirs(path.join(rocm_path, "include"))
+
+    add_files("src/kernels/*.hip.cpp", {
+        cxxflags = {"-x hip", "--offload-arch=native"}
+    })

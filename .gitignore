@@ -112,6 +112,7 @@ Thumbs.db
 .venv/
 __pycache__/
 *.bin
-tests/fixtures/
 
+tests/reference/
 model_config.json
+vocab.txt

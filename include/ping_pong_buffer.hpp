@@ -3,6 +3,8 @@
 #include "hip/hip_runtime.h"
 #include <cstddef>
 #include <stdexcept>
+#include "gpu_utils.hpp"
+
 template <typename T>
 class PingPongBuffer{
     private:
@@ -96,8 +98,8 @@ class PingPongBuffer{
         // Move assignment operator
         PingPongBuffer& operator=(PingPongBuffer&& o) noexcept {
             if (this != &o) {
-                if (buffer_a) hipFree(buffer_a);
-                if (buffer_b) hipFree(buffer_b);
+                if (buffer_a) HIP_CHECK(hipFree(buffer_a));
+                if (buffer_b) HIP_CHECK(hipFree(buffer_b));
                 buffer_a = o.buffer_a;
                 buffer_b = o.buffer_b;
                 capacity_ = o.capacity_;
