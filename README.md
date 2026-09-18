@@ -1,6 +1,6 @@
 # qwen-hip
 
-A minimal C++ and HIP inference engine for the Qwen 4B architecture (Qwen 2.5 series) running natively on AMD RDNA 2 GPUs (Radeon RX 6800 XT). 
+A minimal C++ and HIP inference engine for the Qwen2.5 architecture running natively on AMD RDNA 2 GPUs (Radeon RX 6800 XT). 
 
 The goal of this project is to implement the autoregressive transformer pipeline from scratch without high-level runtime engines, evaluate operator performance on AMD hardware, and verify numerical correctness against a PyTorch reference implementation.
 
@@ -124,15 +124,17 @@ Verifies that each HIP kernel's output matches the PyTorch reference values with
 xmake run test_kernels
 ```
 
-### 4. Run Inference and Benchmarks
+### 4. Run Inference
 ```bash
 # Run interactive generation
 xmake run qwen_infer --weights weights.bin --prompt "Write an LRU cache in C++" --max-tokens 256
-
-# Run performance benchmark suite
-xmake run bench_runner --weights weights.bin --warmup 10 --iterations 50
 ```
-
+### 5. Run benchmark
+```bash
+# Run performance benchmark suite
+xmake build benchmark_engine
+python3 benches/benchmark.py --model Qwen/Qwen2.5-3B
+```
 ## Profiling
 
 Generate execution traces and hardware metrics for inspection in Radeon GPU Profiler (RGP):

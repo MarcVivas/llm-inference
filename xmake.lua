@@ -1,4 +1,5 @@
 add_requires("doctest")
+add_requires("nlohmann_json 3.12.0")
 add_rules("plugin.compile_commands.autoupdate", {outputdir = "."})
 
 target("tokenizers_c_lib")
@@ -23,7 +24,7 @@ target("llm_engine")
     add_includedirs("3rdparty/tokenizers-cpp/include")
 
     add_linkdirs("3rdparty/tokenizers-cpp/rust/target/release")
-    add_links("tokenizers_c")
+    add_links("tokenizers_c", "rocblas")
 
     add_syslinks("pthread", "dl")
 
@@ -110,8 +111,7 @@ target("test_kernels")
 
     add_deps("tokenizers_c_lib")
 
-    add_files("tests/test_main.cpp")
-    add_files("tests/test_embedding.cpp")
+    add_files("tests/*.cpp")
     add_files("src/kernels/*.hip.cpp")
     add_files("3rdparty/tokenizers-cpp/src/huggingface_tokenizer.cc")
 
@@ -120,7 +120,7 @@ target("test_kernels")
     add_includedirs("3rdparty/tokenizers-cpp/include")
 
     add_linkdirs("3rdparty/tokenizers-cpp/rust/target/release")
-    add_links("tokenizers_c")
+    add_links("tokenizers_c", "rocblas")
     add_syslinks("pthread", "dl")
 
     add_packages("nlohmann_json")
@@ -136,4 +136,25 @@ target("test_kernels")
 
     add_files("src/kernels/*.hip.cpp", {
         cxxflags = {"-x hip", "--offload-arch=native"}
-    })
+})
+
+
+target("benchmark_engine")
+    set_kind("binary")
+    set_languages("c++23")
+    add_deps("tokenizers_c_lib")
+
+    add_files("benches/main_bench.cpp")
+    add_files("src/kernels/*.hip.cpp", { cxxflags = {"-x hip", "--offload-arch=native"} })
+    add_files("3rdparty/tokenizers-cpp/src/huggingface_tokenizer.cc")
+
+    add_includedirs("include", "benches", "3rdparty/tokenizers-cpp/include", "/opt/rocm/include")
+    add_linkdirs("3rdparty/tokenizers-cpp/rust/target/release")
+    add_links("tokenizers_c", "rocblas")
+    add_syslinks("pthread", "dl")
+    add_packages("nlohmann_json")
+
+    set_toolset("cc", "clang@hipcc")
+    set_toolset("cxx", "clang@hipcc")
+    set_toolset("ld", "clang@hipcc")
+    add_defines("__HIP_PLATFORM_AMD__", "__HIPCC__")

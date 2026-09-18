@@ -35,7 +35,6 @@ struct Model {
     }
 
     private:
-
         // Reads and validates the 44-byte configuration header
         static ModelConfig parse_model_config(std::span<const std::byte> bytes) {
             return ModelConfig(bytes);
