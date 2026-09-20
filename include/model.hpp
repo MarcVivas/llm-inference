@@ -5,6 +5,7 @@
 #include "ping_pong_buffer.hpp"
 #include <span>
 #include<hip/hip_fp16.h>
+#include "rope_cache.hpp"
 #include "tokenizers_cpp.h"
 
 struct Model {
@@ -12,6 +13,7 @@ struct Model {
     DeviceWeights device_weights;
     PingPongBuffer<__half> activations;
     std::unique_ptr<tokenizers::Tokenizer> tokenizer;
+    RopeCache rope_cache; 
 
     // KVCache kv_cache; 
     
@@ -28,6 +30,8 @@ struct Model {
         
         this->device_weights = upload_model_weights(bytes, weights_offset, this->config);
         this->activations = PingPongBuffer<__half>(Model::calculate_activation_size(config, config.max_seq_len));
+
+        this->rope_cache = create_rope_cache(config.max_seq_len, config.head_dim, config.rope_theta);
     }
 
     void run_inference(const __half* prompt_embeddings, const size_t seq_len){

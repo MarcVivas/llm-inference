@@ -2,7 +2,6 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include "kernels/kernels.hpp"
-#include "gpu_utils.hpp"
 
 __global__ void embedding_lookup_kernel(const int32_t* __restrict__ input_tokens, const __half* __restrict__ embed_table, __half* __restrict__ output_embeddings, const uint hidden_size, const uint total_threads) 
 {
@@ -37,5 +36,4 @@ void launch_embedding_lookup(
     
     embedding_lookup_kernel<<<grid, block_dim>>>(d_input_tokens, d_embed_table, d_output_embeddings, hidden_size, total_threads);
 
-    HIP_CHECK(hipDeviceSynchronize());
 }

@@ -47,6 +47,7 @@ TEST_CASE("Kernel: Embedding Lookup") {
         seq_len, 
         hidden_size
     );
+    HIP_CHECK(hipDeviceSynchronize());
 
     // Download result and verify
     std::vector<__half> actual_out = download_gpu_tensor(d_out, total_elements);

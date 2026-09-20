@@ -1,7 +1,6 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include "kernels/kernels.hpp"
-#include "gpu_utils.hpp"
 
 static constexpr size_t BLOCK_SIZE = 512;
 
@@ -139,5 +138,4 @@ void launch_rms_norm(
             rms_norm_kernel_dynamic<<<grid, block_dim, shared_bytes>>>(d_input, d_gamma, d_out, hidden_size, eps, total_elements);
     }
 
-    HIP_CHECK(hipDeviceSynchronize());
 }

@@ -45,18 +45,19 @@ TEST_CASE("Kernel: Fused QKV GEMM") {
     __half* d_qkv_out = nullptr;
     HIP_CHECK(hipMalloc(&d_qkv_out, seq_len * total_qkv_dim * sizeof(__half)));
 
-    rocblas_handle handle = get_rocblas_handle();
 
     // Launch the Kernel
     launch_qkv_gemm(
         d_input_norm, 
         d_qkv_out, 
-        model.device_weights.transformer_blocks[0].q_proj, // Gamma
+        // Q, K and V weights are contiguous in the monolithic weight buffer,
+        // so q_proj is also the start of the fused QKV weight matrix.
+        model.device_weights.transformer_blocks[0].q_proj,
         seq_len, 
         hidden_size,
-        total_qkv_dim,
-        handle
+        total_qkv_dim
     );
+    HIP_CHECK(hipDeviceSynchronize());
 
     // Download result and verify
     std::vector<__half> actual_out = download_gpu_tensor(d_qkv_out, seq_len * total_qkv_dim);
