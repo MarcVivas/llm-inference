@@ -116,3 +116,5 @@ __pycache__/
 tests/reference/
 model_config.json
 vocab.txt
+
+.cache
