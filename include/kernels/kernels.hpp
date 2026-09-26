@@ -55,3 +55,16 @@ void launch_causal_attention(
     size_t num_kv_heads,
     size_t head_dim
 );
+
+
+
+void launch_attention_out_projection(
+    const __half* d_in, //[seq_len, num_heads, head_dim]
+    __half* d_out,  //[seq_len, hidden_size]
+    const __half* d_o_proj_weights, // [hidden_size, num_heads * head_dim] (Pytorch [out, in])
+    size_t seq_len,
+    size_t hidden_size,
+    size_t num_heads,
+    size_t head_dim,
+    float beta = 0.f    // 0 for unit test, 1 for fused residual add
+);

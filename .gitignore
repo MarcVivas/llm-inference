@@ -118,3 +118,5 @@ model_config.json
 vocab.txt
 
 .cache
+
+benches/cpp_bench.json
