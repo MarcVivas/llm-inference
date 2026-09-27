@@ -68,3 +68,32 @@ void launch_attention_out_projection(
     size_t head_dim,
     float beta = 0.f    // 0 for unit test, 1 for fused residual add
 );
+
+void launch_gate_up_gemm(
+    const __half* d_input_norm,      // Input:  [seq_len, hidden_size]
+    __half* d_gate_up_out,     // Output: [seq_len, 2 * intermediate_size]
+    const __half* d_weight_gate_up,       // Weight: [2 * intermediate_size, hidden_size]
+    size_t seq_len,
+    size_t hidden_size,
+    size_t intermediate_size
+);
+
+
+void launch_swiglu(
+    const __half* d_gate_up,   // [seq_len, 2 * intermediate_size]
+    __half* d_out,          // [seq_len, intermediate_size]
+    size_t seq_len, 
+    size_t total_elements,   // seq_len * intermediate_size
+    size_t intermediate_size
+);
+
+
+void launch_down_proj_gemm(
+    const __half* d_in, // [seq_len, intermediate_size]
+    __half* d_out,  // [seq_len, hidden_size]
+    const __half* d_weights_down, // [intermediate_size, hidden_size]
+    size_t seq_len,
+    size_t hidden_size,
+    size_t intermediate_size,
+    float beta = 0.0f    
+);
