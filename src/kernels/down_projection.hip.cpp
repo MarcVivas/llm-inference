@@ -53,6 +53,6 @@ void launch_down_proj_gemm(
     );
 
     if(status != rocblas_status_success){
-        throw std::runtime_error("rocblas_gemm_ex failed for o_proj");
+        throw std::runtime_error("rocblas_gemm_ex failed for down_proj");
     }
 }

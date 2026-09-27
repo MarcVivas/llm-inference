@@ -83,6 +83,38 @@ TEST_CASE("Kernel: Fused QKV GEMM") {
     INFO("Verifying V projection slice...");
     test_utils::check_tensor_close(act_v, exp_v);
 
+    // Exercise consumers directly on the interleaved GEMM output. Standalone
+    // fixture tests use packed tensors and cannot catch incorrect QKV strides.
+    auto exp_rot_q = test_utils::load_binary_file<__half>("../../../../tests/reference/layer0_q_rope.bin");
+    auto exp_rot_k = test_utils::load_binary_file<__half>("../../../../tests/reference/layer0_k_rope.bin");
+    auto exp_attn = test_utils::load_binary_file<__half>("../../../../tests/reference/layer0_attn_out.bin");
+    launch_rope(d_qkv_out, d_qkv_out + q_dim,
+                model.rope_cache.d_cos, model.rope_cache.d_sin,
+                seq_len, model.config.num_heads, model.config.num_kv_heads,
+                model.config.head_dim, total_qkv_dim, total_qkv_dim);
+    HIP_CHECK(hipDeviceSynchronize());
+    actual_out = download_gpu_tensor(d_qkv_out, seq_len * total_qkv_dim);
+    for (size_t s = 0; s < seq_len; ++s) {
+        const __half* row = actual_out.data() + s * total_qkv_dim;
+        std::memcpy(act_q.data() + s * q_dim, row, q_dim * sizeof(__half));
+        std::memcpy(act_k.data() + s * kv_dim, row + q_dim, kv_dim * sizeof(__half));
+        std::memcpy(act_v.data() + s * kv_dim, row + q_dim + kv_dim, kv_dim * sizeof(__half));
+    }
+    test_utils::check_tensor_close(act_q, exp_rot_q, 2e-2f, 2e-2f);
+    test_utils::check_tensor_close(act_k, exp_rot_k, 2e-2f, 2e-2f);
+    test_utils::check_tensor_close(act_v, exp_v);
+
+    __half* d_attn_out = nullptr;
+    HIP_CHECK(hipMalloc(&d_attn_out, exp_attn.size() * sizeof(__half)));
+    launch_causal_attention(d_qkv_out, d_qkv_out + q_dim,
+                            d_qkv_out + q_dim + kv_dim, d_attn_out,
+                            seq_len, model.config.num_heads, model.config.num_kv_heads,
+                            model.config.head_dim, total_qkv_dim, total_qkv_dim);
+    HIP_CHECK(hipDeviceSynchronize());
+    auto actual_attn = download_gpu_tensor(d_attn_out, exp_attn.size());
+    test_utils::check_tensor_close(actual_attn, exp_attn, 2e-2f, 2e-2f);
+    HIP_CHECK(hipFree(d_attn_out));
+
     // Cleanup
     HIP_CHECK(hipFree(d_input_norm));
     HIP_CHECK(hipFree(d_qkv_out));

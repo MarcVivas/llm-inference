@@ -41,6 +41,8 @@ void launch_rope(
     size_t num_heads,
     size_t num_kv_heads,
     size_t head_dim,
+    size_t q_stride,
+    size_t k_stride,
     size_t start_pos = 0         // Position offset (0 for prefill)
 );
 
@@ -53,7 +55,9 @@ void launch_causal_attention(
     size_t seq_len,
     size_t num_heads,
     size_t num_kv_heads,
-    size_t head_dim
+    size_t head_dim,
+    size_t q_stride = 0,  // Elements between tokens; 0 means packed Q.
+    size_t kv_stride = 0  // Elements between tokens; 0 means packed K/V.
 );
 
 
@@ -96,4 +100,13 @@ void launch_down_proj_gemm(
     size_t hidden_size,
     size_t intermediate_size,
     float beta = 0.0f    
+);
+
+void launch_lm_head_gemm(
+    const __half* d_final_norm_out, // [seq_len, hidden_size]
+    __half*       d_logits_out, // [seq_len, vocab_size]
+    const __half* d_w_lm_head, // Pytorch: [vocab_size, hidden_size] Actual: [hidden_size, vocab_size]
+    size_t seq_len,
+    size_t hidden_size,
+    size_t vocab_size
 );

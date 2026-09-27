@@ -52,6 +52,9 @@ TEST_CASE("Kernel: RoPE (Rotary Position Embeddings)") {
     __half* d_q = upload_to_device(in_q);
     __half* d_k = upload_to_device(in_k);
 
+    const size_t q_stride = num_heads * head_dim;    
+    const size_t k_stride = num_kv_heads * head_dim; 
+    
     // Launch RoPE Kernel (Under Test)
     launch_rope(
         d_q,
@@ -62,6 +65,8 @@ TEST_CASE("Kernel: RoPE (Rotary Position Embeddings)") {
         num_heads,
         num_kv_heads,
         head_dim,
+        q_stride,
+        k_stride,
         /*start_pos=*/0
     );
     HIP_CHECK(hipDeviceSynchronize());

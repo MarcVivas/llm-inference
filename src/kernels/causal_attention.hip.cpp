@@ -289,7 +289,7 @@ __global__ void causal_attention(
         const uint kv_start_row = i * KV_TILE_SIZE;
         
         // Get the starting index of this row.
-        const uint kv_row_start_idx = kv_start_row * (num_kv_heads * head_dim) + (kv_head_id * head_dim);
+        const uint kv_row_start_idx = kv_start_row * kv_row_stride + (kv_head_id * head_dim);
         
         // Load tiles into shared memory
         load_kv_tile(kv_tile_elements, head_dim, kv_row_stride, seq_len, kv_start_row, kv_row_start_idx, d_k, d_v, k_tile, v_tile);
@@ -323,7 +323,7 @@ __global__ void causal_attention(
 
         const float result = output_accumulator[out_id] / weight_sum[q_row]; 
 
-        const size_t global_id = query_token * query_row_stride + query_head_id * head_dim + col;
+        const size_t global_id = query_token * (num_heads * head_dim) + query_head_id * head_dim + col;
         d_out[global_id] = __float2half(result);
     }
     
@@ -337,7 +337,9 @@ void launch_causal_attention(
     size_t seq_len,
     size_t num_heads,
     size_t num_kv_heads,
-    size_t head_dim
+    size_t head_dim,
+    size_t q_stride,
+    size_t kv_stride
 ){
     if (seq_len == 0 || num_kv_heads == 0) {
         return;
@@ -359,8 +361,8 @@ void launch_causal_attention(
     const size_t num_q_tiles = (seq_len + QUERY_TILE_SIZE - 1) / QUERY_TILE_SIZE;
     const size_t num_kv_tiles = (seq_len + KV_TILE_SIZE - 1) / KV_TILE_SIZE;
 
-    const size_t query_row_stride = num_heads * head_dim; 
-    const size_t kv_row_stride = num_kv_heads * head_dim;
+    const size_t query_row_stride = q_stride ? q_stride : num_heads * head_dim;
+    const size_t kv_row_stride = kv_stride ? kv_stride : num_kv_heads * head_dim;
 
     const float rsqrt_head_dim = static_cast<float>(rsqrtf(head_dim));
     

@@ -11,7 +11,15 @@ class ModelConfig:
         self.head_dim = getattr(config, "head_dim", None) or (self.hidden_size // self.num_heads)
         self.max_seq_len = getattr(config, "max_position_embeddings", 2048)
         self.rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
-        self.rope_theta = getattr(config, "rope_theta", 5000000.0)
+        rope_theta = getattr(config, "rope_theta", None)
+        if rope_theta is None and hasattr(config, "rope_scaling") and config.rope_scaling:
+            if isinstance(config.rope_scaling, dict):
+                rope_theta = config.rope_scaling.get("rope_theta", None)
+            else:
+                rope_theta = getattr(config.rope_scaling, "rope_theta", None)
+                 
+        # Default fallback if neither exists
+        self.rope_theta = float(rope_theta if rope_theta is not None else 5000000.0)
 
     def print_architecture(self):
         print("Architecture Hyperparameters:")
