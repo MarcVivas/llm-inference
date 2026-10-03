@@ -192,6 +192,15 @@ def main():
 
     eager_res = benchmark_pytorch_eager(model, inputs, args.max_tokens)
     compiled_res = benchmark_pytorch_compiled(model, inputs, args.max_tokens)
+
+    print("\n[Cleanup] Freeing PyTorch GPU memory for C++ engine...")
+    del model
+    del inputs
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    
     cpp_res = run_cpp_benchmark(args.binary, args.weights, args.max_tokens)
 
     print_comparison_table(eager_res, compiled_res, cpp_res)

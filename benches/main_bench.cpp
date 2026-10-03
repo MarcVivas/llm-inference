@@ -1,5 +1,6 @@
 #include "gpu_timer.hpp"
 #include "gpu_utils.hpp"
+#include "model_inference.hpp"
 #include "model.hpp"
 #include <nlohmann/json.hpp>
 #include <filesystem>
@@ -45,18 +46,17 @@ void warmup_gpu(Model& model) {
 }
 
 // Measure TTFT (Prefill phase)
-float measure_prefill(Model& model, const std::vector<int>& tokens) {
+float measure_prefill(ModelInference& engine, const std::vector<int>& tokens) {
     GpuTimer timer;
     timer.start();
 
-    // Note: Call forward pass on the prompt sequence:
-    // run_prefill_forward(model, tokens);
+    engine.prefill(tokens);
 
     return timer.stop_and_sync();
 }
 
 // Measure per-token autoregressive decoding
-std::vector<float> measure_decode_loop(Model& model, size_t max_tokens) {
+std::vector<float> measure_decode_loop(ModelInference& engine, std::vector<int> tokens, size_t max_tokens) {
     GpuTimer timer;
     std::vector<float> step_latencies;
     step_latencies.reserve(max_tokens);
@@ -65,7 +65,7 @@ std::vector<float> measure_decode_loop(Model& model, size_t max_tokens) {
         timer.start();
 
         // Note: Call single-token decode forward pass:
-        // int next_token = run_decode_step(model);
+        int32_t next_token = engine.decode(tokens);
 
         float ms = timer.stop_and_sync();
         step_latencies.push_back(ms);
@@ -103,7 +103,8 @@ int main(int argc, char* argv[]) {
 
         MemoryMappedFile file(config.weights_path);
         Model model(file);
-
+        ModelInference inference(model);
+        
         std::vector<int> prompt_tokens = model.tokenizer->Encode(config.prompt);
         std::println("[C++] Prompt tokenized ({} tokens)", prompt_tokens.size());
 
@@ -114,10 +115,10 @@ int main(int argc, char* argv[]) {
         metrics.generated_tokens = config.max_new_tokens;
 
         std::println("[C++] Measuring prefill...");
-        metrics.prefill_time_ms = measure_prefill(model, prompt_tokens);
+        metrics.prefill_time_ms = measure_prefill(inference, prompt_tokens);
 
         std::println("[C++] Measuring decode ({} tokens)...", config.max_new_tokens);
-        metrics.step_times_ms = measure_decode_loop(model, config.max_new_tokens);
+        metrics.step_times_ms = measure_decode_loop(inference, prompt_tokens, config.max_new_tokens);
 
         export_metrics_json(metrics, config.output_json);
 
