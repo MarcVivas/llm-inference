@@ -110,3 +110,5 @@ void launch_lm_head_gemm(
     size_t hidden_size,
     size_t vocab_size
 );
+
+void launch_argmax(const __half *d_logits, int* d_best_token_id, size_t vocab_size);

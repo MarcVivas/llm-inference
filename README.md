@@ -74,7 +74,7 @@ xychart-beta
 
 ```text
 .
-├── benches/                # C++ benchmarking harness using hipEvent timing
+├── benches/                # Inference benchmarks using wall-clock timing
 ├── include/
 │   ├── gpu_utils.hpp       # HIP error checking, memory allocators, timing macros
 │   ├── model_config.hpp    # Parses hyperparameter shapes from config.json
@@ -134,6 +134,20 @@ xmake run qwen_infer --weights weights.bin --prompt "Write an LRU cache in C++" 
 # Run performance benchmark suite
 xmake build benchmark_engine
 python3 benches/benchmark.py --model Qwen/Qwen2.5-3B
+```
+Use the same model checkpoint that was exported to `weights.bin`. The benchmark
+passes identical prompt token IDs to both engines and reports medians after full
+generation warmup (`--repeats 3 --warmups 1` by default). It generates exactly
+`--max-tokens` tokens, ignoring EOS for timing. The first token is timed separately;
+the remaining tokens are reported as generation throughput. PyTorch uses a KV
+cache, while C++ currently recomputes the full growing context on each step.
+The compiled path uses Inductor with dynamic shapes; graph replay is disabled
+because the dynamic KV cache retains tensors between forward calls.
+
+The C++ harness also accepts token IDs directly as a JSON array:
+
+```bash
+build/linux/x86_64/release/benchmark_engine weights.bin 128 results.json tokens.json 3 1
 ```
 ## Profiling
 

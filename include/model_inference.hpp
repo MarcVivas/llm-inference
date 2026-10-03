@@ -49,7 +49,11 @@ class ModelInference{
 
             compute_last_token_logits(seq_len);
 
-            return sample_greedy();
+
+            launch_argmax(d_logits, d_best_token, model_.config.vocab_size);
+            int32_t best_token_id = -1;
+            HIP_CHECK(hipMemcpy(&best_token_id, d_best_token, sizeof(int32_t), hipMemcpyDeviceToHost));
+            return best_token_id;
         }
 
         int decode(std::span<const int> tokens){
@@ -87,8 +91,9 @@ class ModelInference{
         __half* d_scratch_b = nullptr;   // Med Scratch:   [seq_len, intermediate_size]
 
         // Tokens and output logits
-        int* d_tokens = nullptr;
-        __half* d_logits = nullptr;
+        int* d_tokens = nullptr;    // [max_seq_len]
+        __half* d_logits = nullptr; // [vocab_size]
+        int* d_best_token = nullptr; // 4 bytes! (Direct output from GPU Argmax)
 
         void allocate_vram_buffers(){
             const auto& config = model_.config;
@@ -103,6 +108,7 @@ class ModelInference{
 
             HIP_CHECK(hipMalloc(&d_tokens, config.max_seq_len * sizeof(int)));
             HIP_CHECK(hipMalloc(&d_logits, config.vocab_size * sizeof(__half)));
+            HIP_CHECK(hipMalloc(&d_best_token, sizeof(int32_t)));
 
         }
 
@@ -112,7 +118,9 @@ class ModelInference{
             if (d_scratch_b) auto a = hipFree(d_scratch_b);
             if (d_tokens) auto a = hipFree(d_tokens);
             if (d_logits) auto a = hipFree(d_logits);
+            if (d_logits) auto a = hipFree(d_best_token);
         }
+        
         // Executes one Transformer Block (Layer l) using Ping-Pong buffers
         void forward_transformer_layer(size_t layer_idx, size_t seq_len, size_t start_pos) const {
             const auto& block = model_.device_weights.transformer_blocks[layer_idx];

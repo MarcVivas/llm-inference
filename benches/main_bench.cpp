@@ -1,131 +1,93 @@
-#include "gpu_timer.hpp"
 #include "gpu_utils.hpp"
 #include "model_inference.hpp"
 #include "model.hpp"
 #include <nlohmann/json.hpp>
-#include <filesystem>
+#include <algorithm>
+#include <chrono>
 #include <fstream>
-#include <numeric>
 #include <print>
 #include <vector>
 
-struct BenchmarkConfig {
-    std::string weights_path;
-    std::string prompt;
-    size_t max_new_tokens = 128;
-    std::string output_json = "benches/cpp_bench.json";
+using Clock = std::chrono::steady_clock;
+
+struct Run {
+    double prefill_ms;
+    double generation_ms;
+    std::vector<int> generated;
 };
 
-struct BenchmarkMetrics {
-    size_t prompt_tokens = 0;
-    size_t generated_tokens = 0;
-    float prefill_time_ms = 0.0f;
-    std::vector<float> step_times_ms;
-};
-
-// Parse command line arguments
-BenchmarkConfig parse_cli_args(int argc, char* argv[]) {
-    BenchmarkConfig config;
-    if (argc < 2) {
-        throw std::runtime_error("Usage: benchmark_engine <weights.bin> [max_new_tokens] [output_json]");
+// Include launches, GPU execution, and the token transfer to the host.
+Run generate(ModelInference& engine, std::vector<int> tokens, size_t count) {
+    Run run{};
+    auto start = Clock::now();
+    int next = engine.prefill(tokens);
+    run.prefill_ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+    run.generated.push_back(next);
+    tokens.push_back(next);
+    start = Clock::now();
+    for (size_t step = 1; step < count; ++step) {
+        next = engine.decode(tokens); // Currently recomputes the full growing context.
+        run.generated.push_back(next);
+        tokens.push_back(next);
     }
-    config.weights_path = argv[1];
-    if (argc >= 3) config.max_new_tokens = std::stoul(argv[2]);
-    if (argc >= 4) config.output_json = argv[3];
-
-    config.prompt = "<|im_start|>user\nExplain GPU memory bandwidth and latency in high performance computing.<|im_end|>\n<|im_start|>assistant\n";
-    return config;
+    run.generation_ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+    return run;
 }
 
-// Warm up GPU kernels to eliminate driver startup overhead
-void warmup_gpu(Model& model) {
-    std::println("[C++] Warming up GPU kernels...");
-    std::vector<int> dummy_tokens = {151644, 872, 198, 151645}; // Short sequence
-    // Note: Call your prefill forward pass here once implemented
-    HIP_CHECK(hipDeviceSynchronize());
-}
-
-// Measure TTFT (Prefill phase)
-float measure_prefill(ModelInference& engine, const std::vector<int>& tokens) {
-    GpuTimer timer;
-    timer.start();
-
-    engine.prefill(tokens);
-
-    return timer.stop_and_sync();
-}
-
-// Measure per-token autoregressive decoding
-std::vector<float> measure_decode_loop(ModelInference& engine, std::vector<int> tokens, size_t max_tokens) {
-    GpuTimer timer;
-    std::vector<float> step_latencies;
-    step_latencies.reserve(max_tokens);
-
-    for (size_t step = 0; step < max_tokens; ++step) {
-        timer.start();
-
-        // Note: Call single-token decode forward pass:
-        int32_t next_token = engine.decode(tokens);
-
-        float ms = timer.stop_and_sync();
-        step_latencies.push_back(ms);
-    }
-
-    return step_latencies;
-}
-
-// Serialize metrics to structured JSON
-void export_metrics_json(const BenchmarkMetrics& m, const std::string& path) {
-    float total_decode_ms = std::accumulate(m.step_times_ms.begin(), m.step_times_ms.end(), 0.0f);
-    float avg_decode_ms = m.step_times_ms.empty() ? 0.0f : (total_decode_ms / m.step_times_ms.size());
-    float decode_tok_per_sec = (avg_decode_ms > 0.0f) ? (1000.0f / avg_decode_ms) : 0.0f;
-    float prefill_tok_per_sec = (m.prefill_time_ms > 0.0f) ? ((m.prompt_tokens / m.prefill_time_ms) * 1000.0f) : 0.0f;
-
-    nlohmann::json root = {
-        {"engine", "cpp_hip"},
-        {"prompt_tokens", m.prompt_tokens},
-        {"generated_tokens", m.generated_tokens},
-        {"prefill_time_ms", m.prefill_time_ms},
-        {"prefill_tokens_per_sec", prefill_tok_per_sec},
-        {"avg_decode_time_ms", avg_decode_ms},
-        {"decode_tokens_per_sec", decode_tok_per_sec},
-        {"step_times_ms", m.step_times_ms}
-    };
-
-    std::ofstream file(path);
-    file << root.dump(4);
-    std::println("[C++] Benchmark results written to: {}", path);
+double median(std::vector<double> values) {
+    std::sort(values.begin(), values.end());
+    const size_t middle = values.size() / 2;
+    return values.size() % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
 }
 
 int main(int argc, char* argv[]) {
     try {
-        BenchmarkConfig config = parse_cli_args(argc, argv);
-
-        MemoryMappedFile file(config.weights_path);
+        if (argc < 5 || argc > 7)
+            throw std::runtime_error("Usage: benchmark_engine <weights.bin> <max_new_tokens> <output_json> <input_tokens_json> [repeats=3] [warmups=1]");
+        const size_t count = std::stoul(argv[2]);
+        const size_t repeats = argc > 5 ? std::stoul(argv[5]) : 3;
+        const size_t warmups = argc > 6 ? std::stoul(argv[6]) : 1;
+        if (!count || !repeats || !warmups)
+            throw std::runtime_error("Token count, repeats, and warmups must be positive");
+        std::ifstream input(argv[4]);
+        const auto tokens = nlohmann::json::parse(input).get<std::vector<int>>();
+        MemoryMappedFile file(argv[1]);
         Model model(file);
-        ModelInference inference(model);
-        
-        std::vector<int> prompt_tokens = model.tokenizer->Encode(config.prompt);
-        std::println("[C++] Prompt tokenized ({} tokens)", prompt_tokens.size());
-
-        warmup_gpu(model);
-
-        BenchmarkMetrics metrics;
-        metrics.prompt_tokens = prompt_tokens.size();
-        metrics.generated_tokens = config.max_new_tokens;
-
-        std::println("[C++] Measuring prefill...");
-        metrics.prefill_time_ms = measure_prefill(inference, prompt_tokens);
-
-        std::println("[C++] Measuring decode ({} tokens)...", config.max_new_tokens);
-        metrics.step_times_ms = measure_decode_loop(inference, prompt_tokens, config.max_new_tokens);
-
-        export_metrics_json(metrics, config.output_json);
-
+        if (tokens.empty() || tokens.size() > model.config.max_seq_len ||
+            count - 1 > model.config.max_seq_len - tokens.size())
+            throw std::runtime_error("Prompt plus generation exceeds the context window");
+        for (int token : tokens)
+            if (token < 0 || static_cast<size_t>(token) >= model.config.vocab_size)
+                throw std::runtime_error("Input token is outside this model's vocabulary");
+        ModelInference engine(model);
+        std::println("[C++] {} prompt tokens; warming up {} full generation runs", tokens.size(), warmups);
+        for (size_t i = 0; i < warmups; ++i) generate(engine, tokens, count);
+        std::vector<double> prefill_times, generation_times;
+        Run last{};
+        for (size_t i = 0; i < repeats; ++i) {
+            last = generate(engine, tokens, count);
+            prefill_times.push_back(last.prefill_ms);
+            generation_times.push_back(last.generation_ms);
+        }
+        const double prefill_ms = median(prefill_times);
+        const double generation_ms = median(generation_times);
+        nlohmann::json result = {
+            {"engine", "cpp_hip"}, {"uses_kv_cache", false},
+            {"prompt_tokens", tokens.size()}, {"input_token_ids", tokens},
+            {"generated_tokens", last.generated.size()}, {"generated_token_ids", last.generated},
+            {"repeats", repeats}, {"warmups", warmups},
+            {"prefill_time_ms", prefill_ms},
+            {"prefill_tokens_per_sec", tokens.size() * 1000.0 / prefill_ms},
+            {"generation_after_first_ms", count > 1 ? generation_ms : 0.0},
+            {"generation_after_first_tokens_per_sec", count > 1 ? (count - 1) * 1000.0 / generation_ms : 0.0},
+            {"prefill_samples_ms", prefill_times}, {"generation_samples_ms", generation_times}
+        };
+        std::ofstream output(argv[3]);
+        output << result.dump(4);
+        if (!output) throw std::runtime_error("Failed to write benchmark results");
+        std::println("[C++] Results written to {}", argv[3]);
     } catch (const std::exception& e) {
         std::println(stderr, "[C++ Error] {}", e.what());
         return 1;
     }
-
-    return 0;
 }

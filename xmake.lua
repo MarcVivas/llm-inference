@@ -96,7 +96,7 @@ target("llm_engine")
             end
 
             target:add("files", "src/kernels/*.hip.cpp", {
-                cxxflags = {"-x hip", "--offload-arch=native"}
+                cxxflags = {"-x hip", "--offload-arch=native", "-mno-wavefrontsize64"}
             })
         end
 
@@ -135,7 +135,7 @@ target("test_kernels")
     add_includedirs(path.join(rocm_path, "include"))
 
     add_files("src/kernels/*.hip.cpp", {
-        cxxflags = {"-x hip", "--offload-arch=native"}
+        cxxflags = {"-x hip", "--offload-arch=native", "-mno-wavefrontsize64"}
 })
 
 
@@ -145,7 +145,7 @@ target("benchmark_engine")
     add_deps("tokenizers_c_lib")
 
     add_files("benches/main_bench.cpp")
-    add_files("src/kernels/*.hip.cpp", { cxxflags = {"-x hip", "--offload-arch=native"} })
+    add_files("src/kernels/*.hip.cpp", { cxxflags = {"-x hip", "--offload-arch=native", "-mno-wavefrontsize64"} })
     add_files("3rdparty/tokenizers-cpp/src/huggingface_tokenizer.cc")
 
     add_includedirs("include", "benches", "3rdparty/tokenizers-cpp/include", "/opt/rocm/include")
