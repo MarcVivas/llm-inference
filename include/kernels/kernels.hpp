@@ -47,6 +47,24 @@ void launch_rope(
 );
 
 
+void launch_rope_and_store_kv(
+    __half* d_q,                 // [seq_len, num_heads, head_dim]
+    __half* d_k,                 // [seq_len, num_kv_heads, head_dim]
+    __half* d_v,                 // [seq_len, num_kv_heads, head_dim]
+    __half* d_k_cache,           // [max_seq_len, num_kv_heads, head_dim]
+    __half* d_v_cache,           // [max_seq_len, num_kv_heads, head_dim]
+    const __half* d_cos,         // [max_seq_len, head_dim / 2]
+    const __half* d_sin,         // [max_seq_len, head_dim / 2]
+    size_t seq_len,
+    size_t num_heads,
+    size_t num_kv_heads,
+    size_t head_dim,
+    size_t q_stride,
+    size_t k_stride,
+    size_t start_pos,        // Position offset (0 for prefill)
+    bool apply_rotation
+);
+
 void launch_causal_attention(
     const __half* d_q,
     const __half* d_k,

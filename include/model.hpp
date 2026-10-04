@@ -2,7 +2,6 @@
 #include "device_weights.hpp"
 #include "model_config.hpp"
 #include "memory_mapped_file.hpp"
-#include "ping_pong_buffer.hpp"
 #include <span>
 #include<hip/hip_fp16.h>
 #include "rope_cache.hpp"
@@ -11,7 +10,6 @@
 struct Model {
     ModelConfig config;
     DeviceWeights device_weights;
-    PingPongBuffer<__half> activations;
     std::unique_ptr<tokenizers::Tokenizer> tokenizer;
     RopeCache rope_cache; 
 
@@ -29,7 +27,6 @@ struct Model {
         this->tokenizer = parse_and_init_tokenizer(bytes, weights_offset);
         
         this->device_weights = upload_model_weights(bytes, weights_offset, this->config);
-        this->activations = PingPongBuffer<__half>(Model::calculate_activation_size(config, config.max_seq_len));
 
         this->rope_cache = create_rope_cache(config.max_seq_len, config.head_dim, config.rope_theta);
     }
@@ -101,7 +98,4 @@ struct Model {
             return config.max_seq_len * max_dim;
         }
 
-        
-        
-    
 };

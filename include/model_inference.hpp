@@ -1,6 +1,7 @@
 #pragma once
 #include "gpu_utils.hpp"
 #include <hip/hip_runtime.h>
+#include "kv_cache.hpp"
 #include "model.hpp"
 #include <algorithm>
 #include <stdexcept>
@@ -10,7 +11,7 @@ class ModelInference{
     public:
 
         explicit ModelInference(const Model& model)
-        : model_(model){
+        : model_(model), kv_cache(KVCache(model.config)){
             hipDeviceProp_t props{};
             int device = 0;
 
@@ -18,6 +19,7 @@ class ModelInference{
             HIP_CHECK(hipGetDeviceProperties(&props, device));
 
             warp_size = props.warpSize;
+            
             allocate_vram_buffers();
         }
 
@@ -31,7 +33,7 @@ class ModelInference{
         ModelInference(ModelInference&&) = delete;
         ModelInference& operator=(ModelInference&&) = delete;
 
-        int prefill(std::span<const int> prompt_tokens) const{
+        int prefill(std::span<const int> prompt_tokens){
             const size_t seq_len = prompt_tokens.size();
 
             if(seq_len == 0 || seq_len > model_.config.max_seq_len){
@@ -49,11 +51,7 @@ class ModelInference{
 
             compute_last_token_logits(seq_len);
 
-
-            launch_argmax(d_logits, d_best_token, model_.config.vocab_size);
-            int32_t best_token_id = -1;
-            HIP_CHECK(hipMemcpy(&best_token_id, d_best_token, sizeof(int32_t), hipMemcpyDeviceToHost));
-            return best_token_id;
+            return sample_greedy();
         }
 
         int decode(std::span<const int> tokens){
@@ -61,24 +59,10 @@ class ModelInference{
         }
 
         int sample_greedy() const {
-            const size_t vocab_size = model_.config.vocab_size;
-            std::vector<__half> host_logits(vocab_size);
-
-            // Copy ONLY the single token's logits back to CPU (takes 0.05 ms)
-            HIP_CHECK(hipMemcpy(host_logits.data(), d_logits, vocab_size * sizeof(__half), hipMemcpyDeviceToHost));
-
-            float max_val = -1e9f;
-            int32_t best_id = 0;
-
-            for (size_t i = 0; i < vocab_size; ++i) {
-                float val = __half2float(host_logits[i]);
-                if (val > max_val) {
-                    max_val = val;
-                    best_id = static_cast<int32_t>(i);
-                }
-            }
-
-            return best_id;
+            launch_argmax(d_logits, d_best_token, model_.config.vocab_size);
+            int best_token_id = -1;
+            HIP_CHECK(hipMemcpy(&best_token_id, d_best_token, sizeof(int32_t), hipMemcpyDeviceToHost));
+            return best_token_id;
         }
 
 
@@ -94,6 +78,10 @@ class ModelInference{
         int* d_tokens = nullptr;    // [max_seq_len]
         __half* d_logits = nullptr; // [vocab_size]
         int* d_best_token = nullptr; // 4 bytes! (Direct output from GPU Argmax)
+
+
+        // KV cache
+        KVCache kv_cache;
 
         void allocate_vram_buffers(){
             const auto& config = model_.config;
@@ -120,9 +108,9 @@ class ModelInference{
             if (d_logits) auto a = hipFree(d_logits);
             if (d_logits) auto a = hipFree(d_best_token);
         }
-        
+
         // Executes one Transformer Block (Layer l) using Ping-Pong buffers
-        void forward_transformer_layer(size_t layer_idx, size_t seq_len, size_t start_pos) const {
+        void forward_transformer_layer(size_t layer_idx, size_t seq_len, size_t start_pos) {
             const auto& block = model_.device_weights.transformer_blocks[layer_idx];
             const auto& cfg   = model_.config;
 
@@ -138,20 +126,20 @@ class ModelInference{
             launch_qkv_gemm(d_scratch_b, d_scratch_a, block.q_proj, seq_len, cfg.hidden_size, total_qkv_dim);
 
             // Strided RoPE: In-place on d_scratch_a (SmolLM3 skips RoPE every 4th layer)
-            if ((layer_idx + 1) % 4 != 0) {
-                launch_rope(
-                    d_scratch_a, d_scratch_a + q_dim,
-                    model_.rope_cache.d_cos, model_.rope_cache.d_sin,
-                    seq_len, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
-                    total_qkv_dim, total_qkv_dim, start_pos
-                );
-            }
+            const bool apply_rotation = (layer_idx + 1) % 4 != 0;
+            launch_rope_and_store_kv(
+                d_scratch_a, d_scratch_a + q_dim, d_scratch_a + q_dim + kv_dim, kv_cache.get_k_cache(layer_idx), kv_cache.get_v_cache(layer_idx),
+                model_.rope_cache.d_cos, model_.rope_cache.d_sin,
+                seq_len, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
+                total_qkv_dim, total_qkv_dim, start_pos, apply_rotation
+            );
+            
 
-            // Flash Attention: reads d_scratch_a (Q, K, V) -> writes d_scratch_b
+            // Q remains in scratch; rotated K and unchanged V are in the cache.
             launch_causal_attention(
-                d_scratch_a, d_scratch_a + q_dim, d_scratch_a + q_dim + kv_dim,
+                d_scratch_a, kv_cache.get_k_cache(layer_idx), kv_cache.get_v_cache(layer_idx),
                 d_scratch_b, seq_len, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
-                total_qkv_dim, total_qkv_dim
+                total_qkv_dim, kv_dim
             );
 
             // o_proj with beta = 1.0f: d_scratch_b + d_x -> d_x (Highway update #1)

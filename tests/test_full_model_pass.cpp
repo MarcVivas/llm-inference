@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 #include "test_utils.hpp"
 #include "model.hpp"
+#include "kv_cache.hpp"
 #include "kernels/kernels.hpp"
 #include "gpu_utils.hpp"
 #include <hip/hip_runtime.h>
@@ -39,6 +40,12 @@ TEST_CASE("End-to-End: Full 36-Layer Model Pass vs Final Logits") {
     const size_t kv_dim            = num_kv_heads * head_dim;
     const size_t total_qkv_dim     = q_dim + 2 * kv_dim;
 
+    // Preserve the real per-layer layout without allocating the model's full
+    // context window for a short reference prompt.
+    ModelConfig cache_config = model.config;
+    cache_config.max_seq_len = seq_len + 2;
+    KVCache kv_cache(cache_config);
+
     // Allocate Static Working VRAM Buffers (Reused for all 36 layers!)
     int32_t* d_tokens        = nullptr;
     __half*  d_x             = nullptr; // The main residual highway buffer
@@ -75,17 +82,24 @@ TEST_CASE("End-to-End: Full 36-Layer Model Pass vs Final Logits") {
         launch_qkv_gemm(d_norm_out, d_qkv_out, block.q_proj, seq_len, hidden_size, total_qkv_dim);
 
         __half* d_q = d_qkv_out;
+        
         // GEMM stores [Q_token, K_token, V_token] for each token.
         __half* d_k = d_qkv_out + q_dim;
         __half* d_v = d_qkv_out + q_dim + kv_dim;
 
-        // RoPE: SmolLM3 skips RoPE on every 4th layer (layers 3, 7, 11...)
-        if ((l + 1) % 4 != 0) {
-            const size_t q_stride = total_qkv_dim;
-            const size_t k_stride = total_qkv_dim;
-            launch_rope(d_q, d_k, rope_cache.d_cos, rope_cache.d_sin, seq_len, num_heads, num_kv_heads, head_dim, q_stride, k_stride, /*start_pos=*/0);
-        }
-        launch_causal_attention(d_q, d_k, d_v, d_attn_out, seq_len, num_heads, num_kv_heads, head_dim, total_qkv_dim, total_qkv_dim);
+        // Every layer stores K/V. SmolLM3 skips rotation on every fourth layer.
+        launch_rope_and_store_kv(d_q, d_k, d_v,
+            kv_cache.get_k_cache(l), kv_cache.get_v_cache(l),
+            rope_cache.d_cos, rope_cache.d_sin,
+            seq_len, num_heads, num_kv_heads, head_dim,
+            total_qkv_dim, total_qkv_dim, /*start_pos=*/0,
+            /*apply_rotation=*/(l + 1) % 4 != 0);
+        
+        HIP_CHECK(hipGetLastError());
+        launch_causal_attention(d_q, kv_cache.get_k_cache(l), kv_cache.get_v_cache(l),
+            d_attn_out, seq_len, num_heads, num_kv_heads, head_dim,
+            total_qkv_dim, kv_dim);
+        HIP_CHECK(hipGetLastError());
 
         // Fused Residual Connection #1: d_x = d_x + o_proj(d_attn_out)
         launch_attention_out_projection(d_attn_out, d_x, block.o_proj, seq_len, hidden_size, num_heads, head_dim, /*beta=*/1.0f);

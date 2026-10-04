@@ -15,7 +15,7 @@ class Chat {
 
 
     public:
-        Chat(const Model& model, const ModelInference& model_inference)
+        Chat(const Model& model, ModelInference& model_inference)
             :model(model), inference_engine(model_inference)
         {
             // Resolve special stop tokens dynamically from the tokenizer
@@ -55,7 +55,7 @@ class Chat {
 
 
     private:
-        const ModelInference& inference_engine;
+        ModelInference& inference_engine;
         const Model& model;
         std::vector<ChatMessage> history_;
         int32_t im_end_id_{-1};

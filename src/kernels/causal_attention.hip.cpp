@@ -331,8 +331,8 @@ __global__ void causal_attention(
 
 void launch_causal_attention(
     const __half* d_q,
-    const __half* d_k,
-    const __half* d_v,
+    const __half* d_k_cache,
+    const __half* d_v_cache,
     __half* d_out,
     size_t seq_len,
     size_t num_heads,
@@ -383,8 +383,8 @@ void launch_causal_attention(
 
     causal_attention<<<grid, block_dim, shared_bytes>>>(
         d_q, 
-        d_k,
-        d_v,
+        d_k_cache,
+        d_v_cache,
         d_out,
         num_heads,
         head_dim,
