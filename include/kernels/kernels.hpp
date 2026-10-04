@@ -65,7 +65,7 @@ void launch_rope_and_store_kv(
     bool apply_rotation
 );
 
-void launch_causal_attention(
+void launch_causal_attention_prefill(
     const __half* d_q,
     const __half* d_k,
     const __half* d_v,
@@ -78,6 +78,21 @@ void launch_causal_attention(
     size_t kv_stride = 0  // Elements between tokens; 0 means packed K/V.
 );
 
+
+void launch_causal_attention_decode(
+    const __half* d_q,
+    const __half* d_k,
+    const __half* d_v,
+    __half* d_out,
+    size_t query_len, // 1 during decode
+    size_t kv_cache_len, // All valid cached tokens
+    size_t start_pos, // Absolute position of the first query. 
+    size_t num_heads,
+    size_t num_kv_heads,
+    size_t head_dim,
+    size_t q_stride = 0,  // Elements between tokens; 0 means packed Q.
+    size_t kv_stride = 0  // Elements between tokens; 0 means packed K/V.
+);
 
 
 void launch_attention_out_projection(

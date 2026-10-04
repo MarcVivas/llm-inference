@@ -88,10 +88,6 @@ class Chat {
             return formatted_prompt;
         }
         
-        // Fromat the entire conversation into template string
-        std::string build_prompt_with_template(){
-
-        }
 
         // Check if a token signals the end of turn
         bool is_eos_token(int token_id) const{
@@ -110,11 +106,12 @@ class Chat {
             std::fflush(stdout);
         
             std::string assistant_reply;
+            int32_t next_token = inference_engine.prefill(current_tokens);
+            const size_t available_tokens = model.config.max_seq_len - current_tokens.size() + 1;
+            const size_t generation_limit = std::min(max_new_tokens, available_tokens);
         
             // Autoregressive Generation Loop
-            for (size_t step = 0; step < max_new_tokens; ++step) {
-                // Run forward pass through the engine
-                int32_t next_token = inference_engine.prefill(current_tokens);
+            for (size_t step = 0; step < generation_limit; ++step) {
         
                 // Check for EOS
                 if (is_stopping_token(next_token)) {
@@ -127,7 +124,8 @@ class Chat {
                 std::fflush(stdout);
         
                 assistant_reply += piece;
-                current_tokens.push_back(next_token);
+                if (step + 1 < generation_limit)
+                    next_token = inference_engine.decode(next_token);
             }
             std::println("");
         

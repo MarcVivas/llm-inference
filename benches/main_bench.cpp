@@ -26,7 +26,7 @@ Run generate(ModelInference& engine, std::vector<int> tokens, size_t count) {
     tokens.push_back(next);
     start = Clock::now();
     for (size_t step = 1; step < count; ++step) {
-        next = engine.decode(tokens); // Currently recomputes the full growing context.
+        next = engine.decode(next); 
         run.generated.push_back(next);
         tokens.push_back(next);
     }

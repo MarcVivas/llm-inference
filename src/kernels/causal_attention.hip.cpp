@@ -1,4 +1,5 @@
 #include <__clang_hip_math.h>
+#include <execution>
 #include <hip/amd_detail/amd_hip_runtime.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
@@ -45,7 +46,7 @@ __device__ inline void init_shared_mem(
     const uint query_row_stride,
     const uint query_start_id,
     const uint query_row,
-    const uint seq_len
+    const uint query_len
 ){
     // Load q tile to shared memory. 
     for(uint i = threadIdx.x; i < q_tile_elements; i+=blockDim.x){
@@ -55,7 +56,7 @@ __device__ inline void init_shared_mem(
         const uint tile_col = i % head_dim;
 
         const uint token = query_row + tile_row; 
-        if(token < seq_len){
+        if(token < query_len){
             const uint global_id = query_start_id + tile_row * query_row_stride + tile_col;
             q_tile[i] = d_q[global_id];            
         }
@@ -82,7 +83,7 @@ __device__ inline void load_kv_tile(
     const uint kv_tile_elements,
     const uint head_dim,
     const uint kv_row_stride,
-    const uint seq_len,
+    const uint kv_cache_len,
     const uint kv_start_row,
     const uint kv_row_start_idx,
     const __half* __restrict__ d_k,
@@ -96,7 +97,7 @@ __device__ inline void load_kv_tile(
         const uint local_col = e  % head_dim;
         const uint token = local_row + kv_start_row;
 
-        if(token < seq_len){
+        if(token < kv_cache_len){
             const uint global_id = kv_row_start_idx + local_row * kv_row_stride + local_col;
             k_tile[e] = d_k[global_id];
             v_tile[e] = d_v[global_id];
@@ -111,7 +112,9 @@ __device__ inline void load_kv_tile(
 __device__ inline void compute_score_tile(
     const uint head_dim,
     const uint query_row,
-    const uint seq_len,
+    const uint query_len, // 1 during decode
+    const uint kv_cache_len, // All valid cached tokens
+    const uint start_pos, // Absolute position of the first query.   
     const uint kv_start_row,
     const float rsqrt_head_dim,
     __half* __restrict__ q_tile,
@@ -134,7 +137,7 @@ __device__ inline void compute_score_tile(
         // Apply causal mask so that future tokens receive 0 attention
         const uint query_token = query_row + local_q_row;
         const uint key_token = kv_start_row + local_kv_row; 
-        if(query_token >= seq_len || key_token >= seq_len  || key_token > query_token){
+        if(query_token >= query_len || key_token >= kv_cache_len  || key_token > start_pos + query_token){
             score = -INFINITY;
         }
         
@@ -144,14 +147,14 @@ __device__ inline void compute_score_tile(
 
 __device__ inline void compute_tile_max_scores(
     const uint query_row,
-    const uint seq_len,
+    const uint query_len,
     float* __restrict__ tile_max_score,
     float* __restrict__ score_tile
 ){
     for(uint q_row = threadIdx.x; q_row < QUERY_TILE_SIZE; q_row+=blockDim.x){
         const uint query_token = query_row + q_row; 
 
-        if(query_token < seq_len){
+        if(query_token < query_len){
             float tile_max = -INFINITY; 
 
             for(uint kv_col = 0; kv_col < KV_TILE_SIZE; kv_col++){
@@ -161,6 +164,8 @@ __device__ inline void compute_tile_max_scores(
             }
 
            tile_max_score[q_row] = tile_max; 
+        } else {
+            tile_max_score[q_row] = -INFINITY;
         }
     }
 }
@@ -234,7 +239,9 @@ __global__ void causal_attention(
     const uint num_heads,
     const uint head_dim, 
     const uint query_group_size,
-    const uint seq_len,
+    const uint query_len, // 1 during decode
+    const uint kv_cache_len, // All valid cached tokens
+    const uint start_pos, // Absolute position of the first query.     
     const uint q_tile_elements,
     const uint query_row_stride,
     const uint num_kv_tiles,
@@ -278,7 +285,7 @@ __global__ void causal_attention(
     __shared__ float weights[QUERY_TILE_SIZE * KV_TILE_SIZE];
     __shared__ float old_scales[QUERY_TILE_SIZE];
     
-    init_shared_mem(d_q, q_tile, output_accumulator, max_score, weight_sum, q_tile_elements, head_dim, query_row_stride, query_start_id, query_row, seq_len);
+    init_shared_mem(d_q, q_tile, output_accumulator, max_score, weight_sum, q_tile_elements, head_dim, query_row_stride, query_start_id, query_row, query_len);
 
 
     // Q tile fixed
@@ -292,16 +299,16 @@ __global__ void causal_attention(
         const uint kv_row_start_idx = kv_start_row * kv_row_stride + (kv_head_id * head_dim);
         
         // Load tiles into shared memory
-        load_kv_tile(kv_tile_elements, head_dim, kv_row_stride, seq_len, kv_start_row, kv_row_start_idx, d_k, d_v, k_tile, v_tile);
+        load_kv_tile(kv_tile_elements, head_dim, kv_row_stride, kv_cache_len, kv_start_row, kv_row_start_idx, d_k, d_v, k_tile, v_tile);
         __syncthreads();
 
         // Compute attention scores S = Q x K_Transposed
-        compute_score_tile(head_dim, query_row, seq_len, kv_start_row, rsqrt_head_dim, q_tile, k_tile, score_tile);
+        compute_score_tile(head_dim, query_row, query_len, kv_cache_len, start_pos, kv_start_row, rsqrt_head_dim, q_tile, k_tile, score_tile);
         __syncthreads();
 
         // Compute the max scores
         // One maximum score per query row
-        compute_tile_max_scores(query_row, seq_len, tile_max_score, score_tile);
+        compute_tile_max_scores(query_row, query_len, tile_max_score, score_tile);
         __syncthreads();
 
         // Compute weights and update scores
@@ -319,7 +326,7 @@ __global__ void causal_attention(
         const uint col = out_id % head_dim;
         const uint query_token = query_row + q_row; 
 
-        if(query_token >= seq_len) continue;
+        if(query_token >= query_len) continue;
 
         const float result = output_accumulator[out_id] / weight_sum[q_row]; 
 
@@ -329,7 +336,7 @@ __global__ void causal_attention(
     
 }
 
-void launch_causal_attention(
+void launch_causal_attention_prefill(
     const __half* d_q,
     const __half* d_k_cache,
     const __half* d_v_cache,
@@ -341,6 +348,10 @@ void launch_causal_attention(
     size_t q_stride,
     size_t kv_stride
 ){
+    const size_t query_len = seq_len;
+    const size_t kv_cache_len = seq_len;
+    const size_t start_pos = 0; 
+    
     if (seq_len == 0 || num_kv_heads == 0) {
         return;
     }
@@ -389,7 +400,9 @@ void launch_causal_attention(
         num_heads,
         head_dim,
         query_group_size,
-        seq_len,
+        query_len,
+        kv_cache_len,
+        start_pos,
         q_tile_elements,
         query_row_stride,
         num_kv_tiles,
@@ -398,4 +411,72 @@ void launch_causal_attention(
         num_kv_heads,
         rsqrt_head_dim
     );
+}
+
+
+void launch_causal_attention_decode(
+    const __half* d_q,
+    const __half* d_k,
+    const __half* d_v,
+    __half* d_out,
+    size_t query_len, // 1 during decode
+    size_t kv_cache_len, // All valid cached tokens
+    size_t start_pos, // Absolute position of the first query. 
+    size_t num_heads,
+    size_t num_kv_heads,
+    size_t head_dim,
+    size_t q_stride,  // Elements between tokens; 0 means packed Q.
+    size_t kv_stride  // Elements between tokens; 0 means packed K/V.
+){
+    if (query_len == 0 || kv_cache_len == 0 || num_kv_heads == 0) return;
+    
+    const size_t num_q_tiles =
+        (query_len + QUERY_TILE_SIZE - 1) / QUERY_TILE_SIZE;
+    
+    const size_t num_kv_tiles =
+        (kv_cache_len + KV_TILE_SIZE - 1) / KV_TILE_SIZE;
+
+    if (num_heads % num_kv_heads != 0) {
+        // Invalid grouped-query-attention configuration.
+        return;
+    }
+
+    
+    // Each Query head shares a kv head!
+    // Compute the size of each query group
+    const size_t query_group_size = num_heads / num_kv_heads;
+
+    const size_t q_tile_elements = QUERY_TILE_SIZE * head_dim;
+    const size_t kv_tile_elements = KV_TILE_SIZE * head_dim;
+
+    const size_t query_row_stride = q_stride ? q_stride : num_heads * head_dim;
+    const size_t kv_row_stride = kv_stride ? kv_stride : num_kv_heads * head_dim;
+
+    const float rsqrt_head_dim = static_cast<float>(rsqrtf(head_dim));
+    
+    // Each block will process 1 query tile
+    const dim3 grid(
+        num_q_tiles,                                        // query tile
+        num_heads,                                          // query head
+        1
+    );
+    constexpr dim3 block_dim(BLOCK_SIZE);
+
+    const size_t shared_bytes = 
+        QUERY_TILE_SIZE * head_dim * sizeof(__half) +   // Input q tile 
+        QUERY_TILE_SIZE * head_dim * sizeof(float) + // Output q tile accumulator
+        KV_TILE_SIZE * head_dim * sizeof(__half) +  // K tile
+        KV_TILE_SIZE * head_dim * sizeof(__half)    // V tile
+    ;
+
+    
+    causal_attention<<<grid, block_dim, shared_bytes>>>(
+        d_q, d_k, d_v, d_out,
+        num_heads, head_dim, query_group_size,
+        query_len, kv_cache_len, start_pos,
+        q_tile_elements, query_row_stride,
+        num_kv_tiles, kv_tile_elements, kv_row_stride,
+        num_kv_heads, rsqrt_head_dim
+    );
+    
 }

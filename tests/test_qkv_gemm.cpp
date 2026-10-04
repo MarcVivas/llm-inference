@@ -37,7 +37,7 @@ TEST_CASE("Kernel: Fused QKV GEMM") {
     const size_t seq_len = total_elements / hidden_size;
 
     const size_t q_dim = model.config.num_heads * model.config.head_dim;
-    const size_t kv_dim = model.config.num_kv_heads * model.config.head_dim; 
+    const size_t kv_dim = model.config.num_kv_heads * model.config.head_dim;
     const size_t total_qkv_dim = q_dim + 2 * kv_dim;
 
     // Prepare GPU input and output buffers
@@ -48,12 +48,12 @@ TEST_CASE("Kernel: Fused QKV GEMM") {
 
     // Launch the Kernel
     launch_qkv_gemm(
-        d_input_norm, 
-        d_qkv_out, 
+        d_input_norm,
+        d_qkv_out,
         // Q, K and V weights are contiguous in the monolithic weight buffer,
         // so q_proj is also the start of the fused QKV weight matrix.
         model.device_weights.transformer_blocks[0].q_proj,
-        seq_len, 
+        seq_len,
         hidden_size,
         total_qkv_dim
     );
@@ -62,7 +62,7 @@ TEST_CASE("Kernel: Fused QKV GEMM") {
     // Download result and verify
     std::vector<__half> actual_out = download_gpu_tensor(d_qkv_out, seq_len * total_qkv_dim);
 
-    // Separate the output in 3 matrices. 
+    // Separate the output in 3 matrices.
     std::vector<__half> act_q(seq_len * q_dim);
     std::vector<__half> act_k(seq_len * kv_dim);
     std::vector<__half> act_v(seq_len * kv_dim);
@@ -79,7 +79,7 @@ TEST_CASE("Kernel: Fused QKV GEMM") {
 
     INFO("Verifying K projection slice...");
     test_utils::check_tensor_close(act_k, exp_k);
-    
+
     INFO("Verifying V projection slice...");
     test_utils::check_tensor_close(act_v, exp_v);
 
@@ -106,7 +106,7 @@ TEST_CASE("Kernel: Fused QKV GEMM") {
 
     __half* d_attn_out = nullptr;
     HIP_CHECK(hipMalloc(&d_attn_out, exp_attn.size() * sizeof(__half)));
-    launch_causal_attention(d_qkv_out, d_qkv_out + q_dim,
+    launch_causal_attention_prefill(d_qkv_out, d_qkv_out + q_dim,
                             d_qkv_out + q_dim + kv_dim, d_attn_out,
                             seq_len, model.config.num_heads, model.config.num_kv_heads,
                             model.config.head_dim, total_qkv_dim, total_qkv_dim);

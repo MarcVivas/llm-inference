@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include "kernels/kernels.hpp"
 
+enum class ForwardMode { Prefill, Decode };
+
 class ModelInference{
     public:
 
@@ -19,7 +21,7 @@ class ModelInference{
             HIP_CHECK(hipGetDeviceProperties(&props, device));
 
             warp_size = props.warpSize;
-            
+
             allocate_vram_buffers();
         }
 
@@ -43,19 +45,51 @@ class ModelInference{
             // Copy the tokens to the GPU
             HIP_CHECK(hipMemcpy(d_tokens, prompt_tokens.data(), prompt_tokens.size_bytes(), hipMemcpyHostToDevice));
 
+            kv_cache.reset_cache();
+
             launch_embedding_lookup(d_tokens, model_.device_weights.embedding_tokens, d_x, seq_len, model_.config.hidden_size);
 
             for (size_t l = 0; l < model_.config.num_layers; ++l) {
-                forward_transformer_layer(l, seq_len, /*start_pos=*/0);
+                forward_transformer_layer(l, seq_len, /*start_pos=*/0, ForwardMode::Prefill);
             }
 
             compute_last_token_logits(seq_len);
 
+            kv_cache.set_cached_len(seq_len);
+
             return sample_greedy();
         }
 
-        int decode(std::span<const int> tokens){
-            return prefill(tokens);
+        int decode(int token){
+            const size_t start_pos = kv_cache.get_cached_len();
+
+            if(start_pos == 0){
+                throw std::runtime_error("Call prefill before decode");
+            }
+            if(start_pos >= model_.config.max_seq_len){
+                throw std::runtime_error("KV cache is full");
+            }
+
+            if(token < 0 || size_t(token) >= model_.config.vocab_size){
+                throw std::runtime_error("Invalid token ID");
+            }
+
+            // Copy the token to the GPU
+            HIP_CHECK(hipMemcpy(d_tokens, &token, sizeof(token), hipMemcpyHostToDevice));
+
+            launch_embedding_lookup(d_tokens, model_.device_weights.embedding_tokens, d_x, 1 /*seq_len*/, model_.config.hidden_size);
+
+            for (size_t l = 0; l < model_.config.num_layers; ++l) {
+                forward_transformer_layer(l, 1 /*seq_len*/, /*start_pos=*/start_pos, ForwardMode::Decode);
+            }
+
+            compute_last_token_logits(1 /*seq_len*/);
+
+            const int next_token = sample_greedy();
+
+            kv_cache.set_cached_len(start_pos + 1);
+
+            return next_token;
         }
 
         int sample_greedy() const {
@@ -110,7 +144,7 @@ class ModelInference{
         }
 
         // Executes one Transformer Block (Layer l) using Ping-Pong buffers
-        void forward_transformer_layer(size_t layer_idx, size_t seq_len, size_t start_pos) {
+        void forward_transformer_layer(size_t layer_idx, size_t seq_len, size_t start_pos, ForwardMode forward_mode) {
             const auto& block = model_.device_weights.transformer_blocks[layer_idx];
             const auto& cfg   = model_.config;
 
@@ -133,14 +167,32 @@ class ModelInference{
                 seq_len, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
                 total_qkv_dim, total_qkv_dim, start_pos, apply_rotation
             );
-            
 
-            // Q remains in scratch; rotated K and unchanged V are in the cache.
-            launch_causal_attention(
-                d_scratch_a, kv_cache.get_k_cache(layer_idx), kv_cache.get_v_cache(layer_idx),
-                d_scratch_b, seq_len, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
-                total_qkv_dim, kv_dim
-            );
+
+
+            if(forward_mode == ForwardMode::Prefill){
+                // Q remains in scratch; rotated K and unchanged V are in the cache.
+                launch_causal_attention_prefill(
+                    d_scratch_a, kv_cache.get_k_cache(layer_idx), kv_cache.get_v_cache(layer_idx),
+                    d_scratch_b, seq_len, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
+                    total_qkv_dim, kv_dim
+                );
+            }
+            else {
+                launch_causal_attention_decode(
+                    d_scratch_a,
+                    kv_cache.get_k_cache(layer_idx),
+                    kv_cache.get_v_cache(layer_idx),
+                    d_scratch_b,
+                    seq_len,
+                    start_pos + seq_len,
+                    start_pos,
+                    cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
+                    total_qkv_dim, kv_dim
+                );
+            }
+            
+            
 
             // o_proj with beta = 1.0f: d_scratch_b + d_x -> d_x (Highway update #1)
             launch_attention_out_projection(

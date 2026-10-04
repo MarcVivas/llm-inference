@@ -96,7 +96,7 @@ TEST_CASE("End-to-End: Full 36-Layer Model Pass vs Final Logits") {
             /*apply_rotation=*/(l + 1) % 4 != 0);
         
         HIP_CHECK(hipGetLastError());
-        launch_causal_attention(d_q, kv_cache.get_k_cache(l), kv_cache.get_v_cache(l),
+        launch_causal_attention_prefill(d_q, kv_cache.get_k_cache(l), kv_cache.get_v_cache(l),
             d_attn_out, seq_len, num_heads, num_kv_heads, head_dim,
             total_qkv_dim, kv_dim);
         HIP_CHECK(hipGetLastError());
