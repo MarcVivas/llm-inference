@@ -1,6 +1,3 @@
-#include <cstdio>
-#include <iostream>
-#include <vector>
 #include "chat.hpp"
 #include "gpu_utils.hpp"
 #include "memory_mapped_file.hpp"
@@ -29,7 +26,6 @@ Model load_model_from_file(const std::string& filepath){
     model.config.print_model_config();
 
     return model;
-    
 }
 
 

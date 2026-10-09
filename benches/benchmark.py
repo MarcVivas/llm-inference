@@ -129,7 +129,7 @@ def print_comparison_table(eager, compiled, cpp):
     print("Fixed token count; EOS stopping disabled. Times are warmed wall-clock medians.")
     print(f"{'Metric':<34} | {'PyTorch Eager':<14} | {'torch.compile':<14} | {'Custom C++ HIP':<14}")
     print("-" * 90)
-    print(f"{'KV cache':<34} | {'yes':<14} | {'yes':<14} | {'no':<14}")
+    print(f"{'KV cache':<34} | {'yes':<14} | {'yes':<14} | {'yes':<14}")
 
     for label, key in [
         ("Time to first token (ms)", "prefill_time_ms"),

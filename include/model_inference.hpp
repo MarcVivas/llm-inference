@@ -113,7 +113,11 @@ class ModelInference{
         __half* d_logits = nullptr; // [vocab_size]
         int* d_best_token = nullptr; // 4 bytes! (Direct output from GPU Argmax)
 
-
+        // Decode attention workspace
+        float* d_partial_output = nullptr;
+        float* d_partial_max = nullptr;
+        float* d_partial_weight_sum = nullptr;
+        size_t decode_chunk_capacity = 0;
         // KV cache
         KVCache kv_cache;
 
@@ -132,15 +136,25 @@ class ModelInference{
             HIP_CHECK(hipMalloc(&d_logits, config.vocab_size * sizeof(__half)));
             HIP_CHECK(hipMalloc(&d_best_token, sizeof(int32_t)));
 
+            decode_chunk_capacity = (config.max_seq_len + KV_CHUNK - 1) / KV_CHUNK;
+
+            const size_t partial_count = static_cast<size_t>(config.num_heads) * decode_chunk_capacity;
+
+            HIP_CHECK(hipMalloc(&d_partial_output, partial_count * config.head_dim * sizeof(float)));
+            HIP_CHECK(hipMalloc(&d_partial_max, partial_count * sizeof(float)));
+            HIP_CHECK(hipMalloc(&d_partial_weight_sum, partial_count * sizeof(float)));
         }
 
         void free_vram_buffers() noexcept {
-            if (d_x) auto a = hipFree(d_x);
-            if (d_scratch_a) auto a = hipFree(d_scratch_a);
-            if (d_scratch_b) auto a = hipFree(d_scratch_b);
-            if (d_tokens) auto a = hipFree(d_tokens);
-            if (d_logits) auto a = hipFree(d_logits);
-            if (d_logits) auto a = hipFree(d_best_token);
+            if (d_x) (void)hipFree(d_x);
+            if (d_scratch_a) (void)hipFree(d_scratch_a);
+            if (d_scratch_b) (void)hipFree(d_scratch_b);
+            if (d_tokens) (void)hipFree(d_tokens);
+            if (d_logits) (void)hipFree(d_logits);
+            if (d_best_token) (void)hipFree(d_best_token);
+            if (d_partial_output) (void)hipFree(d_partial_output);
+            if (d_partial_max) (void)hipFree(d_partial_max);
+            if (d_partial_weight_sum) (void)hipFree(d_partial_weight_sum);
         }
 
         // Executes one Transformer Block (Layer l) using Ping-Pong buffers
@@ -184,6 +198,9 @@ class ModelInference{
                     kv_cache.get_k_cache(layer_idx),
                     kv_cache.get_v_cache(layer_idx),
                     d_scratch_b,
+                    d_partial_output,
+                    d_partial_max,
+                    d_partial_weight_sum,
                     seq_len,
                     start_pos + seq_len,
                     start_pos,
@@ -191,8 +208,8 @@ class ModelInference{
                     total_qkv_dim, kv_dim
                 );
             }
-            
-            
+
+
 
             // o_proj with beta = 1.0f: d_scratch_b + d_x -> d_x (Highway update #1)
             launch_attention_out_projection(

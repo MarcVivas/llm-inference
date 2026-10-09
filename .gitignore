@@ -123,3 +123,5 @@ benches/cpp_bench.json
 benches/profile_tokens.json
 benches/profile_results.json
 benches/profile/*
+
+.rocprofv3/
