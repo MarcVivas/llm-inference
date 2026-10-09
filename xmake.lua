@@ -78,6 +78,7 @@ target("llm_engine")
             target:set("toolset", "ld", "clang@hipcc")
 
             target:add("defines", "__HIP_PLATFORM_AMD__", "__HIPCC__")
+            target:add("links", "rocprofiler-sdk-roctx")
 
             local rocm_path = os.getenv("ROCM_PATH")
             if not rocm_path and hipconfig then
@@ -120,7 +121,7 @@ target("test_kernels")
     add_includedirs("3rdparty/tokenizers-cpp/include")
 
     add_linkdirs("3rdparty/tokenizers-cpp/rust/target/release")
-    add_links("tokenizers_c", "rocblas")
+    add_links("tokenizers_c", "rocblas", "rocprofiler-sdk-roctx")
     add_syslinks("pthread", "dl")
 
     add_packages("nlohmann_json")
@@ -150,7 +151,7 @@ target("benchmark_engine")
 
     add_includedirs("include", "benches", "3rdparty/tokenizers-cpp/include", "/opt/rocm/include")
     add_linkdirs("3rdparty/tokenizers-cpp/rust/target/release")
-    add_links("tokenizers_c", "rocblas")
+    add_links("tokenizers_c", "rocblas", "rocprofiler-sdk-roctx")
     add_syslinks("pthread", "dl")
     add_packages("nlohmann_json")
 
