@@ -67,10 +67,10 @@
         11
     ],
     "generated_tokens": 64,
-    "generation_after_first_ms": 1380.035128,
-    "generation_after_first_tokens_per_sec": 45.651011863228455,
+    "generation_after_first_ms": 1208.125288,
+    "generation_after_first_tokens_per_sec": 52.14690945199386,
     "generation_samples_ms": [
-        1380.035128
+        1208.125288
     ],
     "input_token_ids": [
         128011,
@@ -329,10 +329,10 @@
         198
     ],
     "prefill_samples_ms": [
-        155.021211
+        153.468016
     ],
-    "prefill_time_ms": 155.021211,
-    "prefill_tokens_per_sec": 1638.4854586124993,
+    "prefill_time_ms": 153.468016,
+    "prefill_tokens_per_sec": 1655.0679849800104,
     "prompt_tokens": 254,
     "repeats": 1,
     "uses_kv_cache": false,

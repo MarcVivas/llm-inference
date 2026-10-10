@@ -168,6 +168,14 @@ void launch_lm_head_gemm(
     size_t vocab_size
 );
 
+void launch_lm_head_decode(
+    const __half* d_final_norm_out, // [seq_len, hidden_size]
+    __half*       d_logits_out, // [seq_len, vocab_size]
+    const __half* d_weights_lm_head, // Pytorch: [vocab_size, hidden_size] Actual: [hidden_size, vocab_size]
+    size_t hidden_size,
+    size_t vocab_size
+);
+
 void launch_argmax(const __half *d_logits, int* d_best_token_id, size_t vocab_size);
 
 

@@ -56,3 +56,13 @@ void launch_lm_head_gemm(
         throw std::runtime_error("rocblas_gemm_ex failed for lm head gemm");
     }
 }
+
+void launch_lm_head_decode(
+    const __half* d_final_norm_out, // [seq_len, hidden_size]
+    __half*       d_logits_out, // [seq_len, vocab_size]
+    const __half* d_weights_lm_head, // Pytorch: [vocab_size, hidden_size] Actual: [hidden_size, vocab_size]
+    size_t hidden_size,
+    size_t vocab_size
+){
+    launch_matrix_vector_mul(d_weights_lm_head, d_final_norm_out, d_logits_out, vocab_size, hidden_size);
+}

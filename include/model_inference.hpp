@@ -360,8 +360,8 @@ class ModelInference{
 
             // LM Head: d_scratch_b -> d_logits_ (vocab_size logits for only the last token!)
             {
-                profiling::Range range("LMHead");
-                launch_lm_head_gemm(d_scratch_b, d_logits, model_.device_weights.lm_head, 1, cfg.hidden_size, cfg.vocab_size);
+                profiling::Range range("LMHead GEMV");
+                launch_lm_head_decode(d_scratch_b, d_logits, model_.device_weights.lm_head, cfg.hidden_size, cfg.vocab_size);
             }
         }
 
