@@ -9,8 +9,6 @@
 #include <stdexcept>
 #include "kernels/kernels.hpp"
 
-enum class ForwardMode { Prefill, Decode };
-
 class ModelInference{
     public:
 
@@ -56,7 +54,7 @@ class ModelInference{
             }
 
             for (size_t l = 0; l < model_.config.num_layers; ++l) {
-                forward_transformer_layer(l, seq_len, /*start_pos=*/0, ForwardMode::Prefill);
+                forward_transformer_layer_prefill(l, seq_len, /*start_pos=*/0);
             }
 
             compute_last_token_logits(seq_len);
@@ -90,7 +88,7 @@ class ModelInference{
             }
 
             for (size_t l = 0; l < model_.config.num_layers; ++l) {
-                forward_transformer_layer(l, 1 /*seq_len*/, /*start_pos=*/start_pos, ForwardMode::Decode);
+                forward_transformer_layer_decode(l, 1 /*seq_len*/, /*start_pos=*/start_pos);
             }
 
             compute_last_token_logits(1 /*seq_len*/);
@@ -169,7 +167,7 @@ class ModelInference{
         }
 
         // Executes one Transformer Block (Layer l) using Ping-Pong buffers
-        void forward_transformer_layer(size_t layer_idx, size_t seq_len, size_t start_pos, ForwardMode forward_mode) {
+        void forward_transformer_layer_prefill(size_t layer_idx, size_t seq_len, size_t start_pos) {
             const auto layer_name = std::format("Layer {}", layer_idx);
             profiling::Range layer_range(layer_name.c_str());
             const auto& block = model_.device_weights.transformer_blocks[layer_idx];
@@ -206,38 +204,15 @@ class ModelInference{
 
 
 
-            if(forward_mode == ForwardMode::Prefill){
-                // Q remains in scratch; rotated K and unchanged V are in the cache.
-                {
-                    profiling::Range range("AttentionPrefill");
-                    launch_causal_attention_prefill(
-                        d_scratch_a, kv_cache.get_k_cache(layer_idx), kv_cache.get_v_cache(layer_idx),
-                        d_scratch_b, seq_len, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
-                        total_qkv_dim, kv_dim
-                    );
-                }
-            }
-            else {
-                {
-                    profiling::Range range("FlashDecode");
-                    launch_causal_attention_decode(
-                        d_scratch_a,
-                        kv_cache.get_k_cache(layer_idx),
-                        kv_cache.get_v_cache(layer_idx),
-                        d_scratch_b,
-                        d_partial_output,
-                        d_partial_max,
-                        d_partial_weight_sum,
-                        seq_len,
-                        start_pos + seq_len,
-                        start_pos,
-                        cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
-                        total_qkv_dim, kv_dim
-                    );
-                }
-            }
-
-
+            // Q remains in scratch; rotated K and unchanged V are in the cache.
+            {
+                profiling::Range range("AttentionPrefill");
+                launch_causal_attention_prefill(
+                    d_scratch_a, kv_cache.get_k_cache(layer_idx), kv_cache.get_v_cache(layer_idx),
+                    d_scratch_b, seq_len, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
+                    total_qkv_dim, kv_dim
+                );
+            }                
 
             // o_proj with beta = 1.0f: d_scratch_b + d_x -> d_x (Highway update #1)
             {
@@ -259,6 +234,99 @@ class ModelInference{
             {
                 profiling::Range range("GateUp");
                 launch_gate_up_gemm(d_scratch_b, d_scratch_a, block.gate_proj, seq_len, cfg.hidden_size, cfg.intermediate_size);
+            }
+
+            // SwiGLU Activation: d_scratch_a -> d_scratch_b
+            {
+                profiling::Range range("SwiGLU");
+                launch_swiglu(d_scratch_a, d_scratch_b, seq_len, seq_len * cfg.intermediate_size, cfg.intermediate_size);
+            }
+
+            // down_proj with beta = 1.0f: d_scratch_b + d_x -> d_x (Highway update #2)
+            {
+                profiling::Range range("Down");
+                launch_down_proj_gemm(
+                    d_scratch_b, d_x, block.down_proj,
+                    seq_len, cfg.hidden_size, cfg.intermediate_size, /*beta=*/1.0f
+                );
+            }
+        }
+
+        // Executes one Transformer Block (Layer l) using Ping-Pong buffers
+        void forward_transformer_layer_decode(size_t layer_idx, size_t seq_len, size_t start_pos) {
+            const auto layer_name = std::format("Layer {}", layer_idx);
+            profiling::Range layer_range(layer_name.c_str());
+            const auto& block = model_.device_weights.transformer_blocks[layer_idx];
+            const auto& cfg   = model_.config;
+
+            const size_t q_dim          = cfg.num_heads * cfg.head_dim;
+            const size_t kv_dim         = cfg.num_kv_heads * cfg.head_dim;
+            const size_t total_qkv_dim  = q_dim + (2 * kv_dim);
+
+            // Attention Sub-Block
+            // RMSNorm: d_x -> d_scratch_b
+            {
+                profiling::Range range("InputNorm");
+                launch_rms_norm(d_x, d_scratch_b, block.input_normalization, seq_len, cfg.hidden_size, cfg.rms_norm_eps, warp_size);
+            }
+
+            // Fused QKV GEMM: d_scratch_b -> d_scratch_a
+            {
+                profiling::Range range("QKV");
+                launch_qkv_gemm(d_scratch_b, d_scratch_a, block.q_proj, seq_len, cfg.hidden_size, total_qkv_dim);
+            }
+
+            // Strided RoPE: In-place on d_scratch_a (SmolLM3 skips RoPE every 4th layer)
+            const bool apply_rotation = (layer_idx + 1) % 4 != 0;
+            {
+                profiling::Range range("RoPE+StoreKV");
+                launch_rope_and_store_kv(
+                    d_scratch_a, d_scratch_a + q_dim, d_scratch_a + q_dim + kv_dim, kv_cache.get_k_cache(layer_idx), kv_cache.get_v_cache(layer_idx),
+                    model_.rope_cache.d_cos, model_.rope_cache.d_sin,
+                    seq_len, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
+                    total_qkv_dim, total_qkv_dim, start_pos, apply_rotation
+                );
+            }
+
+    
+            {
+                profiling::Range range("FlashDecode");
+                launch_causal_attention_decode(
+                    d_scratch_a,
+                    kv_cache.get_k_cache(layer_idx),
+                    kv_cache.get_v_cache(layer_idx),
+                    d_scratch_b,
+                    d_partial_output,
+                    d_partial_max,
+                    d_partial_weight_sum,
+                    seq_len,
+                    start_pos + seq_len,
+                    start_pos,
+                    cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
+                    total_qkv_dim, kv_dim
+                );
+            }
+         
+            // o_proj with beta = 1.0f: d_scratch_b + d_x -> d_x (Highway update #1)
+            {
+                profiling::Range range("AttentionOutput");
+                launch_attention_out_projection(
+                    d_scratch_b, d_x, block.o_proj,
+                    seq_len, cfg.hidden_size, cfg.num_heads, cfg.head_dim, /*beta=*/1.0f
+                );
+            }
+
+            // SwiGLU MLP Sub-Block
+            // Post-Attention RMSNorm: d_x -> d_scratch_b
+            {
+                profiling::Range range("PostAttentionNorm");
+                launch_rms_norm(d_x, d_scratch_b, block.post_attn_norm, seq_len, cfg.hidden_size, cfg.rms_norm_eps, warp_size);
+            }
+
+            // Fused Gate & Up GEMV: d_scratch_b -> d_scratch_a
+            {
+                profiling::Range range("GateUp GEMV");
+                launch_gate_up_decode(d_scratch_b, d_scratch_a, block.gate_proj, cfg.hidden_size, cfg.intermediate_size);
             }
 
             // SwiGLU Activation: d_scratch_a -> d_scratch_b

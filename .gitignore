@@ -119,9 +119,10 @@ vocab.txt
 
 .cache
 
-benches/cpp_bench.json
-benches/profile_tokens.json
+
+
 benches/*.json
+benches/*.csv
 benches/profile/*
 
 .rocprofv3/

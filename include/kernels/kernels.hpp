@@ -2,6 +2,7 @@
 #include <hip/hip_fp16.h>
 #include <cstdint>
 #include <cstddef>
+#include <hip/hip_runtime.h>
 
 void launch_embedding_lookup(
     const int32_t* d_input_tokens, 
@@ -119,6 +120,14 @@ void launch_gate_up_gemm(
     size_t intermediate_size
 );
 
+void launch_gate_up_decode(
+    const __half* d_input_norm,      // Input:  [seq_len, hidden_size]
+    __half* d_gate_up_out,     // Output: [seq_len, 2 * intermediate_size]
+    const __half* d_weight_gate_up,       // Weight: [2 * intermediate_size, hidden_size]
+    size_t hidden_size,
+    size_t intermediate_size
+);
+
 
 void launch_swiglu(
     const __half* d_gate_up,   // [seq_len, 2 * intermediate_size]
@@ -139,6 +148,8 @@ void launch_down_proj_gemm(
     float beta = 0.0f    
 );
 
+
+
 void launch_lm_head_gemm(
     const __half* d_final_norm_out, // [seq_len, hidden_size]
     __half*       d_logits_out, // [seq_len, vocab_size]
@@ -149,3 +160,19 @@ void launch_lm_head_gemm(
 );
 
 void launch_argmax(const __half *d_logits, int* d_best_token_id, size_t vocab_size);
+
+
+
+// W: row-major [out_dim, in_dim]
+// x: [in_dim]
+// y: [out_dim]
+// y = W * x + beta * y
+void launch_matrix_vector_mul(
+    const __half* d_weight,
+    const __half* d_input,
+    __half* d_output,
+    size_t out_dim,
+    size_t in_dim,
+    float beta = 0.0f,
+    hipStream_t stream = nullptr
+);
