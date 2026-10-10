@@ -112,6 +112,8 @@ Thumbs.db
 .venv/
 __pycache__/
 *.bin
+*.gguf
+benches/llama_server.log
 
 tests/reference/
 model_config.json

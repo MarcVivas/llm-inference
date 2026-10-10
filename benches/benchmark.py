@@ -2,7 +2,7 @@
 """Compare identical greedy workloads, with wall-clock timing and warmed medians.
 
 A fixed number of tokens is generated even after EOS to keep workloads equal.
-PyTorch uses a KV cache; the current C++ engine recomputes the growing context.
+All engines use a KV cache. Optional llama.cpp timings include HTTP streaming.
 """
 import argparse
 import gc
@@ -11,8 +11,10 @@ import json
 from pathlib import Path
 import statistics
 import subprocess
+import sys
 import tempfile
 import time
+import urllib.request
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -36,6 +38,11 @@ def parse_arguments():
     parser.add_argument("--warmups", type=positive_int, default=1)
     parser.add_argument("--prompt", default="Explain GPU memory bandwidth.")
     parser.add_argument("--binary", default="./build/linux/x86_64/release/benchmark_engine")
+    parser.add_argument("--llama-url", help="Optional local llama-server URL, e.g. http://127.0.0.1:8080")
+    parser.add_argument("--llama-gguf", help="FP16 GGUF; launch llama.cpp after other engines release VRAM")
+    parser.add_argument("--llama-server", default="./build/llama-hip/bin/llama-server")
+    parser.add_argument("--llama-port", type=positive_int, default=8080)
+    parser.add_argument("--pytorch-output", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -121,22 +128,80 @@ def run_cpp_benchmark(args, token_ids):
     return result
 
 
-def print_comparison_table(eager, compiled, cpp):
-    if len({result["prompt_tokens"] for result in (eager, compiled, cpp)}) != 1:
+def run_llama_benchmark(args, token_ids):
+    def run():
+        request = urllib.request.Request(
+            args.llama_url.rstrip("/") + "/completion",
+            data=json.dumps({"prompt": token_ids, "n_predict": args.max_tokens,
+                             "temperature": 0, "repeat_penalty": 1.0,
+                             "ignore_eos": True, "cache_prompt": False,
+                             "return_tokens": True, "stream": True}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        start = time.perf_counter()
+        first = None
+        generated = []
+        final = None
+        with urllib.request.urlopen(request, timeout=600) as response:
+            for line in response:
+                if not line.startswith(b"data:"):
+                    continue
+                event = json.loads(line[5:])
+                if "error" in event:
+                    raise RuntimeError(event["error"])
+                tokens = event.get("tokens", [])
+                if tokens and first is None:
+                    first = time.perf_counter()
+                generated.extend(tokens)
+                if event.get("stop"):
+                    final = event
+                    break
+        end = time.perf_counter()
+        if first is None or final is None or len(generated) != args.max_tokens:
+            raise RuntimeError("llama.cpp did not return the requested token count")
+        if final["timings"]["prompt_n"] != len(token_ids):
+            raise RuntimeError("llama.cpp prompt length differs")
+        return (first - start) * 1000, (end - first) * 1000, generated
+
+    print("[llama.cpp] Warming up and benchmarking local HTTP streaming...")
+    for _ in range(args.warmups):
+        run()
+    runs = [run() for _ in range(args.repeats)]
+    prefill = statistics.median(r[0] for r in runs)
+    decode = statistics.median(r[1] for r in runs)
+    result = {"prompt_tokens": len(token_ids), "input_token_ids": token_ids,
+              "generated_tokens": len(runs[-1][2]), "generated_token_ids": runs[-1][2],
+              "prefill_time_ms": prefill, "prefill_tokens_per_sec": len(token_ids) * 1000 / prefill,
+              "generation_after_first_tokens_per_sec": (args.max_tokens - 1) * 1000 / decode,
+              "timing_method": "HTTP streaming wall clock", "uses_kv_cache": True}
+    DEFAULT_CPP_JSON.with_name("llama_bench.json").write_text(json.dumps(result, indent=4))
+    return result
+
+
+def print_comparison_table(eager, compiled, cpp, llama=None):
+    entries = [("PyTorch Eager", eager), ("torch.compile", compiled), ("Custom C++ HIP", cpp)]
+    if llama is not None:
+        entries.append(("llama.cpp HTTP", llama))
+    if len({result["prompt_tokens"] for _, result in entries}) != 1:
         raise RuntimeError("Prompt lengths differ")
 
     print(f"\nIdentical prompt: {eager['prompt_tokens']} tokens; generation: {eager['generated_tokens']} tokens")
     print("Fixed token count; EOS stopping disabled. Times are warmed wall-clock medians.")
-    print(f"{'Metric':<34} | {'PyTorch Eager':<14} | {'torch.compile':<14} | {'Custom C++ HIP':<14}")
-    print("-" * 90)
-    print(f"{'KV cache':<34} | {'yes':<14} | {'yes':<14} | {'yes':<14}")
+    print(f"{'Metric':<34} | " + " | ".join(f"{name:<14}" for name, _ in entries))
+    print("-" * (37 + 17 * len(entries)))
+    print(f"{'KV cache':<34} | " + " | ".join(f"{'yes':<14}" for _ in entries))
 
     for label, key in [
         ("Time to first token (ms)", "prefill_time_ms"),
         ("Prefill speed (input tok/s)", "prefill_tokens_per_sec"),
         ("Generation after first (tok/s)", "generation_after_first_tokens_per_sec"),
     ]:
-        print(f"{label:<34} | {eager[key]:<14.2f} | {compiled[key]:<14.2f} | {cpp[key]:<14.2f}")
+        print(f"{label:<34} | " + " | ".join(f"{result[key]:<14.2f}" for _, result in entries))
+
+    if llama is not None:
+        print("NOTE: llama.cpp includes HTTP streaming overhead; use an FP16 GGUF with all layers on GPU.")
+        if eager["generated_token_ids"] != llama["generated_token_ids"]:
+            print("NOTE: llama.cpp and PyTorch token sequences differ.")
 
     if eager["generated_token_ids"] != compiled["generated_token_ids"]:
         print("NOTE: compiled and eager token sequences differ.")
@@ -145,9 +210,7 @@ def print_comparison_table(eager, compiled, cpp):
         print("NOTE: C++ and PyTorch token sequences differ; performance does not establish correctness.")
 
 
-def main():
-    args = parse_arguments()
-
+def run_pytorch_benchmarks(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype=torch.float16, device_map="cuda", trust_remote_code=True,
@@ -180,9 +243,72 @@ def main():
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
 
+    return eager, compiled, token_ids
+
+
+def main():
+    args = parse_arguments()
+    if args.llama_gguf and args.llama_url:
+        raise ValueError("Use either --llama-gguf or --llama-url")
+    if args.pytorch_output:
+        eager, compiled, token_ids = run_pytorch_benchmarks(args)
+        Path(args.pytorch_output).write_text(json.dumps({
+            "eager": eager, "compiled": compiled, "input_token_ids": token_ids,
+        }))
+        return
+
+    # Process exit releases all PyTorch/Inductor device allocations before
+    # benchmarking the independent engines, including allocations retained
+    # beyond empty_cache() and compiler.reset().
+    with tempfile.TemporaryDirectory(prefix="llm-pytorch-benchmark-") as directory:
+        result_path = Path(directory) / "results.json"
+        subprocess.run([sys.executable, "-u", str(Path(__file__).resolve()),
+                        *sys.argv[1:], "--pytorch-output", str(result_path)], check=True)
+        results = json.loads(result_path.read_text())
+    eager, compiled, token_ids = results["eager"], results["compiled"], results["input_token_ids"]
+
     cpp = run_cpp_benchmark(args, token_ids)
 
-    print_comparison_table(eager, compiled, cpp)
+    llama = None
+    if args.llama_gguf:
+        args.llama_url = f"http://127.0.0.1:{args.llama_port}"
+        log_path = DEFAULT_CPP_JSON.with_name("llama_server.log")
+        with log_path.open("w") as log:
+            server = subprocess.Popen([
+                args.llama_server, "-m", args.llama_gguf, "-ngl", "999",
+                "-lv", "4",
+                "-c", str(max(512, len(token_ids) + args.max_tokens)),
+                "--host", "127.0.0.1", "--port", str(args.llama_port),
+                "--parallel", "1", "-ctk", "f16", "-ctv", "f16",
+            ], stdout=log, stderr=log)
+            try:
+                deadline = time.monotonic() + 180
+                while True:
+                    if server.poll() is not None:
+                        raise RuntimeError(f"llama-server exited; see {log_path}")
+                    try:
+                        with urllib.request.urlopen(args.llama_url + "/health", timeout=1):
+                            break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError(f"llama-server startup timed out; see {log_path}")
+                        time.sleep(0.2)
+                llama = run_llama_benchmark(args, token_ids)
+            finally:
+                server.terminate()
+                try:
+                    server.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait()
+    elif args.llama_url:
+        llama = run_llama_benchmark(args, token_ids)
+    print_comparison_table(eager, compiled, cpp, llama)
+    DEFAULT_CPP_JSON.with_name("comparison.json").write_text(json.dumps({
+        "model": args.model, "repeats": args.repeats, "warmups": args.warmups,
+        "eager": eager, "compiled": compiled, "cpp": cpp, "llama": llama,
+        "llama_gguf": args.llama_gguf,
+    }, indent=4))
 
 
 if __name__ == "__main__":
