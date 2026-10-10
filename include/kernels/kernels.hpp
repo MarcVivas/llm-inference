@@ -33,6 +33,14 @@ void launch_qkv_gemm(
     const size_t total_qkv_dim
 );
 
+void launch_qkv_decode(
+    const __half* d_input_norm,
+    __half* d_qkv_out,
+    const __half* d_qkv_weights,
+    const size_t hidden_size,
+    const size_t total_qkv_dim
+);
+
 void launch_rope(
     __half* d_q,                 // [seq_len, num_heads, head_dim]
     __half* d_k,                 // [seq_len, num_kv_heads, head_dim]
@@ -109,6 +117,16 @@ void launch_attention_out_projection(
     size_t num_heads,
     size_t head_dim,
     float beta = 0.f    // 0 for unit test, 1 for fused residual add
+);
+
+void launch_attention_out_projection_decode(
+    const __half* d_in, //[seq_len, num_heads, head_dim]
+    __half* d_out,  //[seq_len, hidden_size] During inference put here the pre attention matrix
+    const __half* d_o_proj_weights, // [hidden_size, num_heads * head_dim] (Pytorch [out, in])
+    size_t hidden_size,
+    size_t num_heads,
+    size_t head_dim,
+    float beta   // 0 for unit test, 1 for fused residual add
 );
 
 void launch_gate_up_gemm(

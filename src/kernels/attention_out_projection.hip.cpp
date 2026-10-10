@@ -57,3 +57,15 @@ void launch_attention_out_projection(
         throw std::runtime_error("rocblas_gemm_ex failed for o_proj");
     }
 }
+
+void launch_attention_out_projection_decode(
+    const __half* d_in, //[seq_len, num_heads, head_dim]
+    __half* d_out,  //[seq_len, hidden_size] During inference put here the pre attention matrix
+    const __half* d_o_proj_weights, // [hidden_size, num_heads * head_dim] (Pytorch [out, in])
+    size_t hidden_size,
+    size_t num_heads,
+    size_t head_dim,
+    float beta   // 0 for unit test, 1 for fused residual add
+){
+    launch_matrix_vector_mul(d_o_proj_weights, d_in, d_out, hidden_size, num_heads * head_dim, beta);
+}

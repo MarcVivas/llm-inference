@@ -270,10 +270,10 @@ class ModelInference{
                 launch_rms_norm(d_x, d_scratch_b, block.input_normalization, seq_len, cfg.hidden_size, cfg.rms_norm_eps, warp_size);
             }
 
-            // Fused QKV GEMM: d_scratch_b -> d_scratch_a
+            // Fused QKV GEMV: d_scratch_b -> d_scratch_a
             {
-                profiling::Range range("QKV");
-                launch_qkv_gemm(d_scratch_b, d_scratch_a, block.q_proj, seq_len, cfg.hidden_size, total_qkv_dim);
+                profiling::Range range("QKV GEMV");
+                launch_qkv_decode(d_scratch_b, d_scratch_a, block.q_proj, cfg.hidden_size, total_qkv_dim);
             }
 
             // Strided RoPE: In-place on d_scratch_a (SmolLM3 skips RoPE every 4th layer)
@@ -309,10 +309,10 @@ class ModelInference{
          
             // o_proj with beta = 1.0f: d_scratch_b + d_x -> d_x (Highway update #1)
             {
-                profiling::Range range("AttentionOutput");
-                launch_attention_out_projection(
+                profiling::Range range("AttentionOutput GEMV");
+                launch_attention_out_projection_decode(
                     d_scratch_b, d_x, block.o_proj,
-                    seq_len, cfg.hidden_size, cfg.num_heads, cfg.head_dim, /*beta=*/1.0f
+                    cfg.hidden_size, cfg.num_heads, cfg.head_dim, /*beta=*/1.0f
                 );
             }
 

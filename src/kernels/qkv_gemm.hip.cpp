@@ -106,3 +106,13 @@ void launch_qkv_gemm(
         );
     }
 }
+
+void launch_qkv_decode(
+    const __half* d_input_norm,
+    __half* d_qkv_out,
+    const __half* d_qkv_weights,
+    const size_t hidden_size,
+    const size_t total_qkv_dim
+){
+    launch_matrix_vector_mul(d_qkv_weights, d_input_norm, d_qkv_out, total_qkv_dim, hidden_size);
+}
