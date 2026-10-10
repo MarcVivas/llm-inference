@@ -56,3 +56,14 @@ void launch_down_proj_gemm(
         throw std::runtime_error("rocblas_gemm_ex failed for down_proj");
     }
 }
+
+void launch_down_proj_decode(
+    const __half* d_in, // [seq_len, intermediate_size]
+    __half* d_out,  // [seq_len, hidden_size]
+    const __half* d_weights_down, // [hidden_size, intermediate_size] in pytorch is transposed. This is the actual: [intermediate_size, hidden_size]
+    size_t hidden_size,
+    size_t intermediate_size,
+    float beta    
+){
+    launch_matrix_vector_mul(d_weights_down, d_in, d_out, hidden_size, intermediate_size, 1.0f);
+}

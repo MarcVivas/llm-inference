@@ -148,6 +148,15 @@ void launch_down_proj_gemm(
     float beta = 0.0f    
 );
 
+void launch_down_proj_decode(
+    const __half* d_in, // [seq_len, intermediate_size]
+    __half* d_out,  // [seq_len, hidden_size]
+    const __half* d_weights_down, // [hidden_size, intermediate_size] in pytorch is transposed. This is the actual: [intermediate_size, hidden_size]
+    size_t hidden_size,
+    size_t intermediate_size,
+    float beta    
+);
+
 
 
 void launch_lm_head_gemm(

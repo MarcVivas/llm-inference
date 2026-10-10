@@ -338,9 +338,9 @@ class ModelInference{
             // down_proj with beta = 1.0f: d_scratch_b + d_x -> d_x (Highway update #2)
             {
                 profiling::Range range("Down");
-                launch_down_proj_gemm(
+                launch_down_proj_decode(
                     d_scratch_b, d_x, block.down_proj,
-                    seq_len, cfg.hidden_size, cfg.intermediate_size, /*beta=*/1.0f
+                    cfg.hidden_size, cfg.intermediate_size, /*beta=*/1.0f
                 );
             }
         }
