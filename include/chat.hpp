@@ -1,6 +1,7 @@
 #pragma once
 #include "model.hpp"
 #include "model_inference.hpp"
+#include <chrono>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -23,7 +24,7 @@ class Chat {
             endoftext_id_  = resolve_special_token("<|endoftext|>");
 
             // Seed default system prompt
-            append_to_history("system", "You are a helpful, concise assistant.");
+            append_to_history("system", "You are a helpful, concise assistant. /no_think");
         }
 
         // Interactive Terminal REPL Loop
@@ -80,11 +81,17 @@ class Chat {
             std::string formatted_prompt;
         
             for (const auto& msg : history_) {
-                formatted_prompt += "<|im_start|>" + msg.role + "\n" + msg.content + "<|im_end|>\n";
+                formatted_prompt += "<|im_start|>" + msg.role + "\n";
+                if (msg.role == "assistant") {
+                    // SmolLM3's non-reasoning template closes an empty think block
+                    // before each assistant answer.
+                    formatted_prompt += "<think>\n\n</think>\n";
+                }
+                formatted_prompt += msg.content + "<|im_end|>\n";
             }
         
             // Cue the model for the assistant's turn
-            formatted_prompt += "<|im_start|>assistant\n";
+            formatted_prompt += "<|im_start|>assistant\n<think>\n\n</think>\n";
             return formatted_prompt;
         }
         
@@ -106,9 +113,15 @@ class Chat {
             std::fflush(stdout);
         
             std::string assistant_reply;
+            using Clock = std::chrono::steady_clock;
+            const auto prefill_start = Clock::now();
             int32_t next_token = inference_engine.prefill(current_tokens);
+            const double prefill_ms =
+                std::chrono::duration<double, std::milli>(Clock::now() - prefill_start).count();
             const size_t available_tokens = model.config.max_seq_len - current_tokens.size() + 1;
             const size_t generation_limit = std::min(max_new_tokens, available_tokens);
+            double decode_ms = 0.0;
+            size_t decode_steps = 0;
         
             // Autoregressive Generation Loop
             for (size_t step = 0; step < generation_limit; ++step) {
@@ -124,10 +137,23 @@ class Chat {
                 std::fflush(stdout);
         
                 assistant_reply += piece;
-                if (step + 1 < generation_limit)
+                if (step + 1 < generation_limit) {
+                    const auto decode_start = Clock::now();
                     next_token = inference_engine.decode(next_token);
+                    decode_ms += std::chrono::duration<double, std::milli>(Clock::now() - decode_start).count();
+                    ++decode_steps;
+                }
             }
             std::println("");
+
+            std::println("[Timing] Prefill: {:.2f} ms for {} prompt tokens ({:.2f} tok/s)",
+                prefill_ms, current_tokens.size(), current_tokens.size() * 1000.0 / prefill_ms);
+            if (decode_steps > 0) {
+                std::println("[Timing] Decode: {:.2f} ms for {} tokens ({:.2f} tok/s)",
+                    decode_ms, decode_steps, decode_steps * 1000.0 / decode_ms);
+            } else {
+                std::println("[Timing] Decode: no decode steps");
+            }
         
             // Save reply to history for multi-turn context
             append_to_history("assistant", assistant_reply);
