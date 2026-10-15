@@ -73,55 +73,6 @@ __global__ void matrix_vec_mul(
     d_output[row] = __float2half(sum);
 }
 
-__global__ void matrix_vec_mul_vectorized(
-    const __half* __restrict__ d_weight,
-    const __half* __restrict__ d_input,
-    __half* __restrict__ d_output,
-    size_t out_dim,
-    size_t in_dim,
-    float beta
-){
-    __shared__ float warp_sums[BLOCK_SIZE / WARP_SIZE];
-    const uint row = blockIdx.x;
-    float sum = 0.f;
-
-    // 8 __half elements = 16 bytes (128 bits / 4 words)
-    constexpr int VEC_SIZE = 8;
-    const uint vec_in_dim = in_dim / VEC_SIZE;
-
-    // Cast pointers to float4 (16 bytes)
-    const float4* vec_weight = reinterpret_cast<const float4*>(d_weight + row * in_dim);
-    const float4* vec_input  = reinterpret_cast<const float4*>(d_input);
-
-    // 1. Vectorized main loop (4 words per thread)
-    for (uint i = threadIdx.x; i < vec_in_dim; i += blockDim.x) {
-        float4 w_raw = vec_weight[i];
-        float4 x_raw = vec_input[i];
-
-        const __half* w_h = reinterpret_cast<const __half*>(&w_raw);
-        const __half* x_h = reinterpret_cast<const __half*>(&x_raw);
-
-        #pragma unroll
-        for (int k = 0; k < VEC_SIZE; ++k) {
-            sum += __half2float(w_h[k]) * __half2float(x_h[k]);
-        }
-    }
-
-    // 2. Scalar tail loop for remaining elements (if in_dim % 8 != 0)
-    for (uint i = vec_in_dim * VEC_SIZE + threadIdx.x; i < in_dim; i += blockDim.x) {
-        sum += __half2float(d_weight[row * in_dim + i]) * __half2float(d_input[i]);
-    }
-
-    // 3. Block Reduction
-    sum = block_reduction(sum, warp_sums);
-
-    if (threadIdx.x == 0) {
-        if (beta != 0.f) {
-            sum += beta * __half2float(d_output[row]);
-        }
-        d_output[row] = __float2half(sum);
-    }
-}
 
 // One block computes one output row. Vector loads are used only when the
 // row and input are aligned; partial vectors and unaligned rows use scalars.
