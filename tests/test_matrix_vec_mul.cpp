@@ -6,15 +6,18 @@
 #include <vector>
 
 TEST_CASE("Kernel: Matrix vector multiplication vs CPU reference") {
-    struct Shape { size_t out_dim; size_t in_dim; };
+    struct Shape { size_t out_dim; size_t in_dim; size_t offset = 0; };
     // Short reductions, partial blocks, multiple outputs, and real GateUp shape.
     const Shape shapes[] = {{1, 1}, {7, 31}, {129, 129}, {37, 2048},
-                            {19, 11008}, {22016, 2048}};
+                            {19, 11008}, {22016, 2048},
+                            {2048, 2048}, {3072, 2048},
+                            {3, 0}, {7, 8}, {9, 2053}, {5, 2056},
+                            {7, 4096}, {5, 2056, 1}};
     hipStream_t stream;
     HIP_CHECK(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking));
 
     for (const auto shape : shapes) {
-        const auto [out_dim, in_dim] = shape;
+        const auto [out_dim, in_dim, offset] = shape;
         std::vector<__half> weights(out_dim * in_dim), input(in_dim);
         for (size_t i = 0; i < weights.size(); ++i)
             weights[i] = __float2half(static_cast<float>(static_cast<int>(i % 29) - 14) / 64.0f);
@@ -22,15 +25,15 @@ TEST_CASE("Kernel: Matrix vector multiplication vs CPU reference") {
             input[i] = __float2half(static_cast<float>(static_cast<int>(i % 17) - 8) / 16.0f);
 
         __half *d_weights, *d_input, *d_output;
-        HIP_CHECK(hipMalloc(&d_weights, weights.size() * sizeof(__half)));
-        HIP_CHECK(hipMalloc(&d_input, input.size() * sizeof(__half)));
+        HIP_CHECK(hipMalloc(&d_weights, (weights.size() + offset + 1) * sizeof(__half)));
+        HIP_CHECK(hipMalloc(&d_input, (input.size() + offset + 1) * sizeof(__half)));
         // Guards detect writes outside the output, including an excessive grid.
         HIP_CHECK(hipMalloc(&d_output, (out_dim + 2) * sizeof(__half)));
-        HIP_CHECK(hipMemcpy(d_weights, weights.data(), weights.size() * sizeof(__half), hipMemcpyHostToDevice));
-        HIP_CHECK(hipMemcpy(d_input, input.data(), input.size() * sizeof(__half), hipMemcpyHostToDevice));
+        if (!weights.empty()) HIP_CHECK(hipMemcpy(d_weights + offset, weights.data(), weights.size() * sizeof(__half), hipMemcpyHostToDevice));
+        if (!input.empty()) HIP_CHECK(hipMemcpy(d_input + offset, input.data(), input.size() * sizeof(__half), hipMemcpyHostToDevice));
 
         for (float beta : {0.0f, 1.0f, -0.5f}) {
-            INFO("out_dim=" << out_dim << ", in_dim=" << in_dim << ", beta=" << beta);
+            INFO("out_dim=" << out_dim << ", in_dim=" << in_dim << ", offset=" << offset << ", beta=" << beta);
             std::vector<__half> output(out_dim + 2, __float2half(123.0f));
             for (size_t row = 0; row < out_dim; ++row)
                 output[row + 1] = __float2half(beta == 0.0f
@@ -38,7 +41,7 @@ TEST_CASE("Kernel: Matrix vector multiplication vs CPU reference") {
                     : static_cast<float>(static_cast<int>(row % 11) - 5) / 8.0f);
             const auto original = output;
             HIP_CHECK(hipMemcpyAsync(d_output, output.data(), output.size() * sizeof(__half), hipMemcpyHostToDevice, stream));
-            launch_matrix_vector_mul(d_weights, d_input, d_output + 1, out_dim, in_dim, beta, stream);
+            launch_matrix_vector_mul(d_weights + offset, d_input + offset, d_output + 1, out_dim, in_dim, beta, stream);
             HIP_CHECK(hipGetLastError());
             HIP_CHECK(hipMemcpyAsync(output.data(), d_output, output.size() * sizeof(__half), hipMemcpyDeviceToHost, stream));
             HIP_CHECK(hipStreamSynchronize(stream));
