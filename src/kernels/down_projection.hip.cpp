@@ -63,7 +63,8 @@ void launch_down_proj_decode(
     const __half* d_weights_down, // [hidden_size, intermediate_size] in pytorch is transposed. This is the actual: [intermediate_size, hidden_size]
     size_t hidden_size,
     size_t intermediate_size,
-    float beta    
+    float beta,
+    hipStream_t stream
 ){
-    launch_matrix_vector_mul(d_weights_down, d_in, d_out, hidden_size, intermediate_size, 1.0f);
+    launch_matrix_vector_mul(d_weights_down, d_in, d_out, hidden_size, intermediate_size, 1.0f, stream);
 }

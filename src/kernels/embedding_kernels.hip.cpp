@@ -26,7 +26,8 @@ void launch_embedding_lookup(
     const __half* d_embed_table, 
     __half* d_output_embeddings, 
     const size_t seq_len, 
-    const size_t hidden_size
+    const size_t hidden_size,
+    hipStream_t stream
 ){
 
     constexpr size_t BLOCK_SIZE = 128;
@@ -34,6 +35,6 @@ void launch_embedding_lookup(
     const dim3 grid((total_threads + BLOCK_SIZE - 1) / BLOCK_SIZE);
     constexpr dim3 block_dim(BLOCK_SIZE);
     
-    embedding_lookup_kernel<<<grid, block_dim>>>(d_input_tokens, d_embed_table, d_output_embeddings, hidden_size, total_threads);
+    embedding_lookup_kernel<<<grid, block_dim, 0, stream>>>(d_input_tokens, d_embed_table, d_output_embeddings, hidden_size, total_threads);
 
 }

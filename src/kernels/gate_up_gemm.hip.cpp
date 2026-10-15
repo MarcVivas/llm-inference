@@ -67,7 +67,8 @@ void launch_gate_up_decode(
     __half* d_gate_up_out,     // Output: [seq_len, 2 * intermediate_size]
     const __half* d_weight_gate_up,       // Weight: [2 * intermediate_size, hidden_size]
     size_t hidden_size,
-    size_t intermediate_size
+    size_t intermediate_size,
+    hipStream_t stream
 ){
-    launch_matrix_vector_mul(d_weight_gate_up, d_input_norm, d_gate_up_out, 2 * intermediate_size, hidden_size);
+    launch_matrix_vector_mul(d_weight_gate_up, d_input_norm, d_gate_up_out, 2 * intermediate_size, hidden_size, 0.0f, stream);
 }

@@ -1,6 +1,8 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+#include "gpu_utils.hpp"
 #include "kernels/kernels.hpp"
+#include <algorithm>
 
 #define BLOCK_SIZE 64
 
@@ -148,7 +150,8 @@ void launch_rope_and_store_kv(
     size_t q_stride,
     size_t k_stride,
     size_t start_pos,        // Position offset (0 for prefill)
-    bool apply_rotation
+    bool apply_rotation,
+    hipStream_t stream
 ){
     if(seq_len == 0) return;
 
@@ -161,7 +164,7 @@ void launch_rope_and_store_kv(
     constexpr dim3 block_dim(BLOCK_SIZE);
 
     if(apply_rotation){
-        rope_and_store_kv<<<grid, block_dim>>>(d_q, d_k, d_v, d_k_cache, d_v_cache, d_cos, d_sin,
+        rope_and_store_kv<<<grid, block_dim, 0, stream>>>(d_q, d_k, d_v, d_k_cache, d_v_cache, d_cos, d_sin,
             static_cast<uint>(total_q_heads),
             static_cast<uint>(num_heads),
             static_cast<uint>(head_dim),
@@ -184,7 +187,7 @@ void launch_rope_and_store_kv(
     grid = (total_kv_elements + BLOCK_SIZE - 1) / BLOCK_SIZE;
     const size_t kv_dim = num_kv_heads * head_dim;
     
-    copy_to_kv_cache<<<grid, block_dim>>>(d_k, d_v, d_k_cache, d_v_cache, seq_len, kv_dim, k_stride, start_pos, total_k_elements, total_kv_elements);
+    copy_to_kv_cache<<<grid, block_dim, 0, stream>>>(d_k, d_v, d_k_cache, d_v_cache, seq_len, kv_dim, k_stride, start_pos, total_k_elements, total_kv_elements);
 
 }
 
@@ -195,4 +198,40 @@ void launch_rope(
 ) {
     launch_rope_and_store_kv(d_q, d_k, nullptr, nullptr, nullptr, d_cos, d_sin,
         seq_len, num_heads, num_kv_heads, head_dim, q_stride, k_stride, start_pos, true);
+}
+
+
+void update_rope_and_store_kv_node(
+    hipGraphExec_t graph_exec,
+    hipGraphNode_t node,
+    size_t start_pos,
+    bool apply_rotation
+) {
+    hipKernelNodeParams params{};
+    HIP_CHECK(hipGraphKernelNodeGetParams(node, &params));
+
+    uint position = static_cast<uint>(start_pos);
+    params.extra = nullptr;
+
+    if (apply_rotation) {
+        // rope_and_store_kv: 15 arguments; start_pos is argument 14.
+        void* args[15];
+        std::copy_n(params.kernelParams, 15, args);
+        args[14] = &position;
+
+        params.kernelParams = args;
+        HIP_CHECK(hipGraphExecKernelNodeSetParams(
+            graph_exec, node, &params
+        ));
+    } else {
+        // copy_to_kv_cache: 10 arguments; start_pos is argument 7.
+        void* args[10];
+        std::copy_n(params.kernelParams, 10, args);
+        args[7] = &position;
+
+        params.kernelParams = args;
+        HIP_CHECK(hipGraphExecKernelNodeSetParams(
+            graph_exec, node, &params
+        ));
+    }
 }

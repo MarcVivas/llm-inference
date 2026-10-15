@@ -65,7 +65,8 @@ void launch_attention_out_projection_decode(
     size_t hidden_size,
     size_t num_heads,
     size_t head_dim,
-    float beta   // 0 for unit test, 1 for fused residual add
+    float beta, // 0 for unit test, 1 for fused residual add
+    hipStream_t stream
 ){
-    launch_matrix_vector_mul(d_o_proj_weights, d_in, d_out, hidden_size, num_heads * head_dim, beta);
+    launch_matrix_vector_mul(d_o_proj_weights, d_in, d_out, hidden_size, num_heads * head_dim, beta, stream);
 }

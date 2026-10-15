@@ -40,3 +40,20 @@ inline rocblas_handle get_rocblas_handle() {
     static RocblasContext instance;
     return instance.handle;
 }
+
+
+inline hipGraphNode_t last_captured_node(hipStream_t stream) {
+    hipStreamCaptureStatus capture_status;
+    const hipGraphNode_t* dependencies = nullptr;
+    size_t count = 0;
+
+    HIP_CHECK(hipStreamGetCaptureInfo_v2(
+        stream, &capture_status, nullptr, nullptr, &dependencies, &count
+    ));
+
+    if (capture_status != hipStreamCaptureStatusActive || count != 1) {
+        throw std::runtime_error("Expected one capture dependency");
+    }
+
+    return dependencies[0];
+}

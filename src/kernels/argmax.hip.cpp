@@ -68,7 +68,8 @@ __global__ void argmax_kernel(const __half* __restrict__ d_logits, int32_t* __re
 }
 
 void launch_argmax(
-    const __half *d_logits, int* d_best_token_id, size_t vocab_size
+    const __half *d_logits, int* d_best_token_id, size_t vocab_size,
+    hipStream_t stream
 ){
 
     // 1 block covers the whole vocabulary
@@ -76,7 +77,7 @@ void launch_argmax(
     constexpr dim3 block_dim(BLOCK_SIZE);
 
 
-    argmax_kernel<<<grid, block_dim>>>(
+    argmax_kernel<<<grid, block_dim, 0, stream>>>(
         d_logits,
         d_best_token_id,
         static_cast<uint32_t>(vocab_size)

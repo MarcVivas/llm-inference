@@ -10,6 +10,12 @@
 #include "kernels/kernels.hpp"
 
 class ModelInference{
+
+    struct DecodeLayerNodes {
+        hipGraphNode_t store_kv = nullptr;
+        hipGraphNode_t attention = nullptr;
+        hipGraphNode_t merge = nullptr;
+    };
     public:
 
         explicit ModelInference(const Model& model)
@@ -22,6 +28,10 @@ class ModelInference{
 
             warp_size = props.warpSize;
 
+            HIP_CHECK(hipStreamCreate(&stream));
+
+            decode_nodes.resize(model.config.num_layers);
+            
             allocate_vram_buffers();
         }
 
@@ -80,29 +90,53 @@ class ModelInference{
             }
 
             // Copy the token to the GPU
-            HIP_CHECK(hipMemcpy(d_tokens, &token, sizeof(token), hipMemcpyHostToDevice));
+            *h_input_token = token; 
+            HIP_CHECK(hipMemcpyAsync(d_tokens, h_input_token, sizeof(token), hipMemcpyHostToDevice, stream));
 
-            {
-                profiling::Range range("Embedding");
-                launch_embedding_lookup(d_tokens, model_.device_weights.embedding_tokens, d_x, 1 /*seq_len*/, model_.config.hidden_size);
+            if(!graph_exec){
+                // capture once and remember the changing kernel nodes
+                HIP_CHECK(hipStreamBeginCapture(stream, hipStreamCaptureModeGlobal));
+                enqueue_decode(start_pos);
+                HIP_CHECK(hipStreamEndCapture(stream, &graph));
+    
+                HIP_CHECK(hipGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0));
+    
             }
-
-            for (size_t l = 0; l < model_.config.num_layers; ++l) {
-                forward_transformer_layer_decode(l, 1 /*seq_len*/, /*start_pos=*/start_pos);
+            else {
+                // Update the changing nodes for the current start pos and KV length 
+                for (size_t layer = 0; layer < model_.config.num_layers; ++layer) {
+                    const auto& nodes = decode_nodes[layer];
+                    const bool apply_rotation = (layer + 1) % 4 != 0;
+                    const size_t kv_len = start_pos + 1;
+                
+                    update_rope_and_store_kv_node(
+                        graph_exec, nodes.store_kv, start_pos, apply_rotation
+                    );
+                
+                    update_causal_attention_decode_node(
+                        graph_exec, nodes.attention, kv_len
+                    );
+                
+                    update_merge_attention_decode_node(
+                        graph_exec, nodes.merge, kv_len
+                    );
+                }
             }
+            
+            HIP_CHECK(hipGraphLaunch(graph_exec, stream));
 
-            compute_last_token_logits(1 /*seq_len*/);
-
-            const int next_token = sample_greedy();
+            HIP_CHECK(hipMemcpyAsync(h_output_token, d_best_token, sizeof(int), hipMemcpyDeviceToHost, stream));
+            HIP_CHECK(hipStreamSynchronize(stream));  
 
             kv_cache.set_cached_len(start_pos + 1);
 
-            return next_token;
+            return *h_output_token;
         }
 
-        int sample_greedy() const {
+        int sample_greedy(hipStream_t execution_stream = nullptr) const {
             profiling::Range range("SampleGreedy");
-            launch_argmax(d_logits, d_best_token, model_.config.vocab_size);
+            launch_argmax(d_logits, d_best_token, model_.config.vocab_size, execution_stream);
+            HIP_CHECK(hipStreamSynchronize(execution_stream));            
             int best_token_id = -1;
             HIP_CHECK(hipMemcpy(&best_token_id, d_best_token, sizeof(int32_t), hipMemcpyDeviceToHost));
             return best_token_id;
@@ -122,6 +156,9 @@ class ModelInference{
         __half* d_logits = nullptr; // [vocab_size]
         int* d_best_token = nullptr; // 4 bytes! (Direct output from GPU Argmax)
 
+        int* h_input_token = nullptr; 
+        int* h_output_token = nullptr;
+        
         // Decode attention workspace
         float* d_partial_output = nullptr;
         float* d_partial_max = nullptr;
@@ -130,6 +167,13 @@ class ModelInference{
         // KV cache
         KVCache kv_cache;
 
+        hipStream_t stream;
+
+        hipGraph_t graph = nullptr;
+        hipGraphExec_t graph_exec = nullptr; 
+
+        std::vector<DecodeLayerNodes> decode_nodes;
+        
         void allocate_vram_buffers(){
             const auto& config = model_.config;
 
@@ -152,9 +196,16 @@ class ModelInference{
             HIP_CHECK(hipMalloc(&d_partial_output, partial_count * config.head_dim * sizeof(float)));
             HIP_CHECK(hipMalloc(&d_partial_max, partial_count * sizeof(float)));
             HIP_CHECK(hipMalloc(&d_partial_weight_sum, partial_count * sizeof(float)));
+
+            HIP_CHECK(hipHostMalloc(&h_input_token, sizeof(int)));
+            HIP_CHECK(hipHostMalloc(&h_output_token, sizeof(int)));
         }
 
         void free_vram_buffers() noexcept {
+            HIP_CHECK(hipStreamSynchronize(stream));  
+            if (graph_exec) (void)hipGraphExecDestroy(graph_exec);
+            if (graph) (void)hipGraphDestroy(graph);
+            
             if (d_x) (void)hipFree(d_x);
             if (d_scratch_a) (void)hipFree(d_scratch_a);
             if (d_scratch_b) (void)hipFree(d_scratch_b);
@@ -164,6 +215,33 @@ class ModelInference{
             if (d_partial_output) (void)hipFree(d_partial_output);
             if (d_partial_max) (void)hipFree(d_partial_max);
             if (d_partial_weight_sum) (void)hipFree(d_partial_weight_sum);
+            if (h_input_token) (void)hipHostFree(h_input_token);
+            if (h_output_token) (void)hipHostFree(h_output_token);
+         
+
+            (void) hipStreamDestroy(stream);
+        }
+
+        
+        
+        void enqueue_decode(size_t start_pos){
+            
+            // Embedding lookup 
+            {
+                profiling::Range range("Embedding");
+                launch_embedding_lookup(d_tokens, model_.device_weights.embedding_tokens, d_x, 1 /*seq_len*/, model_.config.hidden_size, stream);
+            }
+
+            // Transformer layers
+            for (size_t l = 0; l < model_.config.num_layers; ++l) {
+                forward_transformer_layer_decode(l, 1 /*seq_len*/, /*start_pos=*/start_pos);
+            }
+
+            // LM head
+            compute_last_token_logits(1 /*seq_len*/, stream);
+
+            // Argmax
+            launch_argmax(d_logits, d_best_token, model_.config.vocab_size, stream);
         }
 
         // Executes one Transformer Block (Layer l) using Ping-Pong buffers
@@ -267,13 +345,13 @@ class ModelInference{
             // RMSNorm: d_x -> d_scratch_b
             {
                 profiling::Range range("InputNorm");
-                launch_rms_norm(d_x, d_scratch_b, block.input_normalization, seq_len, cfg.hidden_size, cfg.rms_norm_eps, warp_size);
+                launch_rms_norm(d_x, d_scratch_b, block.input_normalization, seq_len, cfg.hidden_size, cfg.rms_norm_eps, warp_size, stream);
             }
 
             // Fused QKV GEMV: d_scratch_b -> d_scratch_a
             {
                 profiling::Range range("QKV GEMV");
-                launch_qkv_decode(d_scratch_b, d_scratch_a, block.q_proj, cfg.hidden_size, total_qkv_dim);
+                launch_qkv_decode(d_scratch_b, d_scratch_a, block.q_proj, cfg.hidden_size, total_qkv_dim, stream);
             }
 
             // Strided RoPE: In-place on d_scratch_a (SmolLM3 skips RoPE every 4th layer)
@@ -284,8 +362,10 @@ class ModelInference{
                     d_scratch_a, d_scratch_a + q_dim, d_scratch_a + q_dim + kv_dim, kv_cache.get_k_cache(layer_idx), kv_cache.get_v_cache(layer_idx),
                     model_.rope_cache.d_cos, model_.rope_cache.d_sin,
                     seq_len, cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
-                    total_qkv_dim, total_qkv_dim, start_pos, apply_rotation
+                    total_qkv_dim, total_qkv_dim, start_pos, apply_rotation, stream
                 );
+
+                decode_nodes[layer_idx].store_kv = last_captured_node(stream);
             }
 
     
@@ -303,7 +383,7 @@ class ModelInference{
                     start_pos + seq_len,
                     start_pos,
                     cfg.num_heads, cfg.num_kv_heads, cfg.head_dim,
-                    total_qkv_dim, kv_dim
+                    total_qkv_dim, kv_dim, stream, &decode_nodes[layer_idx].attention, &decode_nodes[layer_idx].merge
                 );
             }
          
@@ -312,7 +392,7 @@ class ModelInference{
                 profiling::Range range("AttentionOutput GEMV");
                 launch_attention_out_projection_decode(
                     d_scratch_b, d_x, block.o_proj,
-                    cfg.hidden_size, cfg.num_heads, cfg.head_dim, /*beta=*/1.0f
+                    cfg.hidden_size, cfg.num_heads, cfg.head_dim, /*beta=*/1.0f, stream
                 );
             }
 
@@ -320,19 +400,19 @@ class ModelInference{
             // Post-Attention RMSNorm: d_x -> d_scratch_b
             {
                 profiling::Range range("PostAttentionNorm");
-                launch_rms_norm(d_x, d_scratch_b, block.post_attn_norm, seq_len, cfg.hidden_size, cfg.rms_norm_eps, warp_size);
+                launch_rms_norm(d_x, d_scratch_b, block.post_attn_norm, seq_len, cfg.hidden_size, cfg.rms_norm_eps, warp_size, stream);
             }
 
             // Fused Gate & Up GEMV: d_scratch_b -> d_scratch_a
             {
                 profiling::Range range("GateUp GEMV");
-                launch_gate_up_decode(d_scratch_b, d_scratch_a, block.gate_proj, cfg.hidden_size, cfg.intermediate_size);
+                launch_gate_up_decode(d_scratch_b, d_scratch_a, block.gate_proj, cfg.hidden_size, cfg.intermediate_size, stream);
             }
 
             // SwiGLU Activation: d_scratch_a -> d_scratch_b
             {
                 profiling::Range range("SwiGLU");
-                launch_swiglu(d_scratch_a, d_scratch_b, seq_len, seq_len * cfg.intermediate_size, cfg.intermediate_size);
+                launch_swiglu(d_scratch_a, d_scratch_b, seq_len, seq_len * cfg.intermediate_size, cfg.intermediate_size, stream);
             }
 
             // down_proj with beta = 1.0f: d_scratch_b + d_x -> d_x (Highway update #2)
@@ -340,13 +420,13 @@ class ModelInference{
                 profiling::Range range("Down");
                 launch_down_proj_decode(
                     d_scratch_b, d_x, block.down_proj,
-                    cfg.hidden_size, cfg.intermediate_size, /*beta=*/1.0f
+                    cfg.hidden_size, cfg.intermediate_size, /*beta=*/1.0f, stream
                 );
             }
         }
 
         // Projects the last token through Final Norm and LM Head
-        void compute_last_token_logits(size_t seq_len) const {
+        void compute_last_token_logits(size_t seq_len, hipStream_t execution_stream = nullptr) const {
             const auto& cfg = model_.config;
 
             // Pointer to the last token on the highway
@@ -355,15 +435,17 @@ class ModelInference{
             // Final RMSNorm: d_last_token -> d_scratch_b
             {
                 profiling::Range range("FinalNorm");
-                launch_rms_norm(d_last_token, d_scratch_b, model_.device_weights.final_norm, 1, cfg.hidden_size, cfg.rms_norm_eps, warp_size);
+                launch_rms_norm(d_last_token, d_scratch_b, model_.device_weights.final_norm, 1, cfg.hidden_size, cfg.rms_norm_eps, warp_size, execution_stream);
             }
 
             // LM Head: d_scratch_b -> d_logits_ (vocab_size logits for only the last token!)
             {
                 profiling::Range range("LMHead GEMV");
-                launch_lm_head_decode(d_scratch_b, d_logits, model_.device_weights.lm_head, cfg.hidden_size, cfg.vocab_size);
+                launch_lm_head_decode(d_scratch_b, d_logits, model_.device_weights.lm_head, cfg.hidden_size, cfg.vocab_size, execution_stream);
             }
         }
+
+        
 
 
 };

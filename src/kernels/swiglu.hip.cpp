@@ -37,9 +37,10 @@ void launch_swiglu(
     __half* d_out,          // [seq_len, intermediate_size]
     size_t seq_len, 
     size_t total_elements,   // seq_len * intermediate_size,
-    size_t intermediate_size
+    size_t intermediate_size,
+    hipStream_t stream
 ){
     const dim3 grid((total_elements + BLOCK_SIZE - 1) / BLOCK_SIZE); 
     const dim3 block(BLOCK_SIZE);
-    swiglu<<<grid, block>>>(d_gate_up, d_out, total_elements, intermediate_size);
+    swiglu<<<grid, block, 0, stream>>>(d_gate_up, d_out, total_elements, intermediate_size);
 }

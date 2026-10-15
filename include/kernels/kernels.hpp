@@ -9,7 +9,8 @@ void launch_embedding_lookup(
     const __half* d_embed_table, 
     __half* d_output_embeddings, 
     size_t seq_len, 
-    size_t hidden_size
+    size_t hidden_size,
+    hipStream_t stream = nullptr
 );
 
 
@@ -20,7 +21,8 @@ void launch_rms_norm(
     const size_t seq_len, 
     const size_t hidden_size,
     const float eps,
-    const uint warp_size
+    const uint warp_size,
+    hipStream_t stream = nullptr
 );
 
 
@@ -38,7 +40,8 @@ void launch_qkv_decode(
     __half* d_qkv_out,
     const __half* d_qkv_weights,
     const size_t hidden_size,
-    const size_t total_qkv_dim
+    const size_t total_qkv_dim,
+    hipStream_t stream = nullptr
 );
 
 void launch_rope(
@@ -71,6 +74,14 @@ void launch_rope_and_store_kv(
     size_t q_stride,
     size_t k_stride,
     size_t start_pos,        // Position offset (0 for prefill)
+    bool apply_rotation,
+    hipStream_t stream = nullptr
+);
+
+void update_rope_and_store_kv_node(
+    hipGraphExec_t graph_exec,
+    hipGraphNode_t node,
+    size_t start_pos,
     bool apply_rotation
 );
 
@@ -103,10 +114,17 @@ void launch_causal_attention_decode(
     size_t num_kv_heads,
     size_t head_dim,
     size_t q_stride,                // Elements between Q tokens; 0 means packed.
-    size_t kv_stride                // Elements between K/V tokens; 0 means packed.
+    size_t kv_stride, // Elements between K/V tokens; 0 means packed.
+    hipStream_t stream = nullptr,
+    hipGraphNode_t* attention_node = nullptr,
+    hipGraphNode_t* merge_node = nullptr
 );
 
-
+void update_merge_attention_decode_node(
+    hipGraphExec_t graph_exec,
+    hipGraphNode_t node,
+    size_t kv_cache_len
+);
 
 void launch_attention_out_projection(
     const __half* d_in, //[seq_len, num_heads, head_dim]
@@ -126,7 +144,14 @@ void launch_attention_out_projection_decode(
     size_t hidden_size,
     size_t num_heads,
     size_t head_dim,
-    float beta   // 0 for unit test, 1 for fused residual add
+    float beta, // 0 for unit test, 1 for fused residual add
+    hipStream_t stream = nullptr
+);
+
+void update_causal_attention_decode_node(
+    hipGraphExec_t graph_exec,
+    hipGraphNode_t node,
+    size_t kv_cache_len
 );
 
 void launch_gate_up_gemm(
@@ -143,7 +168,8 @@ void launch_gate_up_decode(
     __half* d_gate_up_out,     // Output: [seq_len, 2 * intermediate_size]
     const __half* d_weight_gate_up,       // Weight: [2 * intermediate_size, hidden_size]
     size_t hidden_size,
-    size_t intermediate_size
+    size_t intermediate_size,
+    hipStream_t stream = nullptr
 );
 
 
@@ -152,7 +178,8 @@ void launch_swiglu(
     __half* d_out,          // [seq_len, intermediate_size]
     size_t seq_len, 
     size_t total_elements,   // seq_len * intermediate_size
-    size_t intermediate_size
+    size_t intermediate_size,
+    hipStream_t stream = nullptr
 );
 
 
@@ -172,7 +199,8 @@ void launch_down_proj_decode(
     const __half* d_weights_down, // [hidden_size, intermediate_size] in pytorch is transposed. This is the actual: [intermediate_size, hidden_size]
     size_t hidden_size,
     size_t intermediate_size,
-    float beta    
+    float beta,
+    hipStream_t stream = nullptr
 );
 
 
@@ -191,10 +219,13 @@ void launch_lm_head_decode(
     __half*       d_logits_out, // [seq_len, vocab_size]
     const __half* d_weights_lm_head, // Pytorch: [vocab_size, hidden_size] Actual: [hidden_size, vocab_size]
     size_t hidden_size,
-    size_t vocab_size
+    size_t vocab_size,
+    hipStream_t stream = nullptr
 );
 
-void launch_argmax(const __half *d_logits, int* d_best_token_id, size_t vocab_size);
+void launch_argmax(const __half *d_logits, int* d_best_token_id, size_t vocab_size,
+    hipStream_t stream = nullptr
+);
 
 
 

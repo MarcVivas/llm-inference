@@ -112,7 +112,8 @@ void launch_qkv_decode(
     __half* d_qkv_out,
     const __half* d_qkv_weights,
     const size_t hidden_size,
-    const size_t total_qkv_dim
+    const size_t total_qkv_dim,
+    hipStream_t stream
 ){
-    launch_matrix_vector_mul(d_qkv_weights, d_input_norm, d_qkv_out, total_qkv_dim, hidden_size);
+    launch_matrix_vector_mul(d_qkv_weights, d_input_norm, d_qkv_out, total_qkv_dim, hidden_size, 0.0f, stream);
 }

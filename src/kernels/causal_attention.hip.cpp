@@ -2,8 +2,10 @@
 #include <hip/amd_detail/amd_warp_functions.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+#include "gpu_utils.hpp"
 #include "kernels/kernels.hpp"
 #include <cmath>
+#include <algorithm>
 
 /// Implementation of GROUPED QUERY ATTENTION
 
@@ -707,7 +709,10 @@ void launch_causal_attention_decode(
     size_t num_kv_heads,
     size_t head_dim,
     size_t q_stride,                // Elements between Q tokens; 0 means packed.
-    size_t kv_stride                // Elements between K/V tokens; 0 means packed.
+    size_t kv_stride, // Elements between K/V tokens; 0 means packed.
+    hipStream_t stream,
+    hipGraphNode_t* attention_node,
+    hipGraphNode_t* merge_node
 ){
     if (query_len == 0 || kv_cache_len == 0 || num_kv_heads == 0) return;
 
@@ -740,7 +745,7 @@ void launch_causal_attention_decode(
 
     constexpr dim3 block_dim(BLOCK_SIZE);
 
-    causal_attention_decode<<<grid, block_dim>>>(
+    causal_attention_decode<<<grid, block_dim, 0, stream>>>(
         d_q,
         d_k_cache,
         d_v_cache,
@@ -755,9 +760,71 @@ void launch_causal_attention_decode(
         num_kv_chunks
     );
 
+    if(attention_node){
+        *attention_node = last_captured_node(stream);
+    }
+
     // One block per query head
     grid = dim3(num_heads, 1, 1);
 
-    merge_attention_decode<<<grid, block_dim>>>(d_partial_out, d_partial_max, d_partial_weight_sum, d_out, num_kv_chunks, head_dim);
+    merge_attention_decode<<<grid, block_dim, 0, stream>>>(d_partial_out, d_partial_max, d_partial_weight_sum, d_out, num_kv_chunks, head_dim);
 
+
+    if(merge_node){
+        *merge_node = last_captured_node(stream);
+    }
+}
+
+
+void update_causal_attention_decode_node(
+    hipGraphExec_t graph_exec,
+    hipGraphNode_t node,
+    size_t kv_cache_len
+) {
+    hipKernelNodeParams params{};
+    HIP_CHECK(hipGraphKernelNodeGetParams(node, &params));
+
+    uint cache_len = static_cast<uint>(kv_cache_len);
+    uint chunks = static_cast<uint>(
+        (kv_cache_len + KV_CHUNK - 1) / KV_CHUNK
+    );
+
+    // causal_attention_decode: 12 arguments.
+    void* args[12];
+    std::copy_n(params.kernelParams, 12, args);
+    args[8] = &cache_len;
+    args[11] = &chunks;
+
+    params.kernelParams = args;
+    params.extra = nullptr;
+    params.gridDim.y = chunks;
+
+    HIP_CHECK(hipGraphExecKernelNodeSetParams(
+        graph_exec, node, &params
+    ));
+}
+
+void update_merge_attention_decode_node(
+    hipGraphExec_t graph_exec,
+    hipGraphNode_t node,
+    size_t kv_cache_len
+) {
+    hipKernelNodeParams params{};
+    HIP_CHECK(hipGraphKernelNodeGetParams(node, &params));
+
+    uint chunks = static_cast<uint>(
+        (kv_cache_len + KV_CHUNK - 1) / KV_CHUNK
+    );
+
+    // merge_attention_decode: 6 arguments.
+    void* args[6];
+    std::copy_n(params.kernelParams, 6, args);
+    args[4] = &chunks;
+
+    params.kernelParams = args;
+    params.extra = nullptr;
+
+    HIP_CHECK(hipGraphExecKernelNodeSetParams(
+        graph_exec, node, &params
+    ));
 }

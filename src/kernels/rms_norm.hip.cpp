@@ -115,7 +115,8 @@ void launch_rms_norm(
     const size_t seq_len,
     const size_t hidden_size,
     const float eps,
-    const uint warp_size
+    const uint warp_size,
+    hipStream_t stream
 ){
 
     // 1 block = 1 token
@@ -129,16 +130,16 @@ void launch_rms_norm(
     switch (hidden_size) {
         case 2048:
             // 2048 / BLOCK_SIZE = 4
-            rms_norm_kernel<2048/BLOCK_SIZE><<<grid, block_dim, shared_bytes>>>(d_input, d_gamma, d_out, hidden_size, eps, total_elements);
+            rms_norm_kernel<2048/BLOCK_SIZE><<<grid, block_dim, shared_bytes, stream>>>(d_input, d_gamma, d_out, hidden_size, eps, total_elements);
             break;
         case 4096:
-            rms_norm_kernel<8><<<grid, block_dim, shared_bytes>>>(d_input, d_gamma, d_out, hidden_size, eps, total_elements);
+            rms_norm_kernel<8><<<grid, block_dim, shared_bytes, stream>>>(d_input, d_gamma, d_out, hidden_size, eps, total_elements);
             break;
         case 8192:
-            rms_norm_kernel<16><<<grid, block_dim, shared_bytes>>>(d_input, d_gamma, d_out, hidden_size, eps, total_elements);
+            rms_norm_kernel<16><<<grid, block_dim, shared_bytes, stream>>>(d_input, d_gamma, d_out, hidden_size, eps, total_elements);
             break;
         default:
-            rms_norm_kernel_dynamic<<<grid, block_dim, shared_bytes>>>(d_input, d_gamma, d_out, hidden_size, eps, total_elements);
+            rms_norm_kernel_dynamic<<<grid, block_dim, shared_bytes, stream>>>(d_input, d_gamma, d_out, hidden_size, eps, total_elements);
             break;
     }
 
