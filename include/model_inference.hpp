@@ -317,7 +317,7 @@ class ModelInference{
             // SwiGLU Activation: d_scratch_a -> d_scratch_b
             {
                 profiling::Range range("SwiGLU");
-                launch_swiglu(d_scratch_a, d_scratch_b, seq_len, seq_len * cfg.intermediate_size, cfg.intermediate_size);
+                launch_swiglu_vectorized(d_scratch_a, d_scratch_b, seq_len, seq_len * cfg.intermediate_size, cfg.intermediate_size);
             }
 
             // down_proj with beta = 1.0f: d_scratch_b + d_x -> d_x (Highway update #2)

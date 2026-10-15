@@ -183,6 +183,16 @@ void launch_swiglu(
 );
 
 
+void launch_swiglu_vectorized(
+    const __half* d_gate_up,   // [seq_len, 2 * intermediate_size]
+    __half* d_out,          // [seq_len, intermediate_size]
+    size_t seq_len, 
+    size_t total_elements,   // seq_len * intermediate_size,
+    size_t intermediate_size,
+    hipStream_t stream = nullptr
+);
+
+
 void launch_down_proj_gemm(
     const __half* d_in, // [seq_len, intermediate_size]
     __half* d_out,  // [seq_len, hidden_size]
