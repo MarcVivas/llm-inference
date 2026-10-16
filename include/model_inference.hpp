@@ -403,23 +403,17 @@ class ModelInference{
                 launch_rms_norm(d_x, d_scratch_b, block.post_attn_norm, seq_len, cfg.hidden_size, cfg.rms_norm_eps, warp_size, stream);
             }
 
-            // Fused Gate & Up GEMV: d_scratch_b -> d_scratch_a
+            // Fused Gate & Up GEMV with SwiGLU Activation: d_scratch_b -> d_scratch_a
             {
-                profiling::Range range("GateUp GEMV");
-                launch_gate_up_decode(d_scratch_b, d_scratch_a, block.gate_proj, cfg.hidden_size, cfg.intermediate_size, stream);
+                profiling::Range range("GateUpSwiGLU");
+                launch_gate_up_swiglu_decode(d_scratch_b, d_scratch_a, block.gate_proj, cfg.hidden_size, cfg.intermediate_size, stream);
             }
 
-            // SwiGLU Activation: d_scratch_a -> d_scratch_b
-            {
-                profiling::Range range("SwiGLU");
-                launch_swiglu(d_scratch_a, d_scratch_b, seq_len, seq_len * cfg.intermediate_size, cfg.intermediate_size, stream);
-            }
-
-            // down_proj with beta = 1.0f: d_scratch_b + d_x -> d_x (Highway update #2)
+            // down_proj with beta = 1.0f: d_scratch_a + d_x -> d_x (Highway update #2)
             {
                 profiling::Range range("Down");
                 launch_down_proj_decode(
-                    d_scratch_b, d_x, block.down_proj,
+                    d_scratch_a, d_x, block.down_proj,
                     cfg.hidden_size, cfg.intermediate_size, /*beta=*/1.0f, stream
                 );
             }

@@ -211,6 +211,16 @@ void launch_gate_up_decode(
     hipStream_t stream = nullptr
 );
 
+// Fused Gate & Up GEMV with SwiGLU activation for decode (1 block computes gate + up + silu*up)
+void launch_gate_up_swiglu_decode(
+    const __half* d_input_norm,      // Input:  [hidden_size]
+    __half* d_swiglu_out,            // Output: [intermediate_size]
+    const __half* d_weight_gate_up,  // Weight: [2 * intermediate_size, hidden_size]
+    size_t hidden_size,
+    size_t intermediate_size,
+    hipStream_t stream = nullptr
+);
+
 
 void launch_swiglu(
     const __half* d_gate_up,   // [seq_len, 2 * intermediate_size]
