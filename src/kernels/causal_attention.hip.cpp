@@ -26,16 +26,51 @@
 #define BLOCK_SIZE 128
 
 // Query tile: [query_tile_size, head_dim]
-#define QUERY_TILE_SIZE 4
+#define QUERY_TILE_SIZE 8
 
 // Key value tile: [KV_TILE_SIZE, head_dim]
-#define KV_TILE_SIZE 4
+#define KV_TILE_SIZE 8
 
 #define NUM_TILE_SCORES QUERY_TILE_SIZE * KV_TILE_SIZE
 
-static_assert((QUERY_TILE_SIZE % 2) == 0,
-              "QUERY_TILE_SIZE must be even for the shared-memory layout");
+static_assert((QUERY_TILE_SIZE % 2) == 0, "QUERY_TILE_SIZE must be even for the shared-memory layout");
 
+// Performs a block reduction
+__device__ inline float block_reduction(float val, float* warp_sums){
+
+    const uint warp_id = threadIdx.x / warpSize;
+    const uint lane_id = threadIdx.x % warpSize;
+
+
+    // Warp reductions
+    for(uint offset = warpSize >> 1; offset > 0; offset>>=1){
+        val += __shfl_down(val, offset);
+    }
+
+    // Write to shared memory the warp sum
+    if(lane_id == 0){
+        warp_sums[warp_id] = val;
+    }
+    __syncthreads();
+
+    // Block reduction
+    if(warp_id == 0){
+        float block_sum = lane_id < (BLOCK_SIZE / warpSize) ? warp_sums[lane_id]: 0.0f;
+
+        for(uint offset = warpSize >> 1; offset > 0; offset >>= 1){
+            block_sum += __shfl_down(block_sum, offset);
+        }
+
+        // Share the result
+        if(lane_id == 0){
+            warp_sums[0] = block_sum;
+        }
+    }
+    __syncthreads();
+
+    float block_sum = warp_sums[0];
+    return block_sum;
+}
 __device__ inline void init_shared_mem(
     const __half* __restrict__ d_q,
     __half* __restrict__ q_tile,
@@ -416,43 +451,8 @@ void launch_causal_attention_prefill(
 }
 
 
+constexpr uint VECTOR_SIZE = sizeof(float4) / sizeof(__half); 
 
-// Performs a block reduction
-__device__ inline float block_reduction(float val, float* warp_sums){
-
-    const uint warp_id = threadIdx.x / warpSize;
-    const uint lane_id = threadIdx.x % warpSize;
-
-
-    // Warp reductions
-    for(uint offset = warpSize >> 1; offset > 0; offset>>=1){
-        val += __shfl_down(val, offset);
-    }
-
-    // Write to shared memory the warp sum
-    if(lane_id == 0){
-        warp_sums[warp_id] = val;
-    }
-    __syncthreads();
-
-    // Block reduction
-    if(warp_id == 0){
-        float block_sum = lane_id < (BLOCK_SIZE / warpSize) ? warp_sums[lane_id]: 0.0f;
-
-        for(uint offset = warpSize >> 1; offset > 0; offset >>= 1){
-            block_sum += __shfl_down(block_sum, offset);
-        }
-
-        // Share the result
-        if(lane_id == 0){
-            warp_sums[0] = block_sum;
-        }
-    }
-    __syncthreads();
-
-    float block_sum = warp_sums[0];
-    return block_sum;
-}
 
 __device__ inline float block_max(float val, float* shared_mem){
 
@@ -519,28 +519,32 @@ __global__ void causal_attention_decode(
     __shared__ float chunk_scores[KV_CHUNK];
 
     // Compute attention score of each token
-    for(uint token_id = kv_start_token_id; token_id < kv_end_token_id; token_id++){
-
-        float partial_score = 0.f;
-
-        for(uint i = threadIdx.x; i < head_dim; i+=blockDim.x){
-
-            const float q = __half2float(d_q[head_id * head_dim + i]);
-            const float k = __half2float(d_k[kv_head_id * head_dim + token_id * kv_stride + i]);
-
-            partial_score += q * k;
+    
+    const uint warp_id = threadIdx.x / warpSize;  // 0..3
+    const uint lane_id = threadIdx.x % warpSize;  // 0..31
+    
+    for (uint token_base = kv_start_token_id; token_base < kv_end_token_id; token_base += 4)
+    {
+        const uint token_id = token_base + warp_id;
+        float sum = 0.f;
+    
+        // This warp handles one Q·K dot product.
+        for (uint d = lane_id; d < head_dim; d += warpSize) {
+            const float q = __half2float(d_q[head_id * head_dim + d]);
+            const float k = __half2float(d_k[kv_head_id * head_dim + token_id * kv_stride + d]);
+            sum += q * k;
         }
-
-        // Sum the partial score across threads to complete the dot product.
-        const float attention_score = block_reduction(partial_score, warp_sums) * rsqrt_head_dim;
-
-        // Store the computed score to shared memory
-        if(threadIdx.x == 0){
-            chunk_scores[token_id - kv_start_token_id] = attention_score;            
+    
+        // Reduce only within this warp; no block-wide barrier here.
+        for (uint offset = warpSize >> 1; offset > 0; offset>>=1){
+            sum += __shfl_down(sum, offset);            
+        }
+    
+        if (lane_id == 0){
+            chunk_scores[token_id - kv_start_token_id] = sum * rsqrt_head_dim;
         }
     }
-
-    __syncthreads();
+    __syncthreads(); // all chunk scores are ready
 
     // Compute the maximum computed score of the block
     float local_max = -INFINITY;
@@ -585,6 +589,115 @@ __global__ void causal_attention_decode(
     if (threadIdx.x == 0) {
         const size_t partial_id = head_id * num_kv_chunks + kv_chunk_id;
     
+        d_partial_max[partial_id] = max_score;
+        d_partial_weight_sum[partial_id] = weight_sum;
+    }
+}
+
+// Read eight adjacent FP16 values with one aligned 128-bit load. Each uint
+// contains the bit patterns of one __half2 pair; arithmetic remains FP32.
+__device__ inline float dot_qk_half8(
+    const __half* __restrict__ q,
+    const __half* __restrict__ k
+){
+    const uint4 q_bits = *reinterpret_cast<const uint4*>(q);
+    const uint4 k_bits = *reinterpret_cast<const uint4*>(k);
+    const __half2* q_pairs = reinterpret_cast<const __half2*>(&q_bits);
+    const __half2* k_pairs = reinterpret_cast<const __half2*>(&k_bits);
+
+    float sum = 0.f;
+    #pragma unroll
+    for (uint pair = 0; pair < 4; ++pair) {
+        const float2 qf = __half22float2(q_pairs[pair]);
+        const float2 kf = __half22float2(k_pairs[pair]);
+        sum += qf.x * kf.x + qf.y * kf.y;
+    }
+    return sum;
+}
+
+// each active lane loads eight adjacent half values through a 128-bit load.
+__global__ void causal_attention_decode_vectorized(
+    const __half* __restrict__ d_q,
+    const __half* __restrict__ d_k,
+    const __half* __restrict__ d_v,
+    float* __restrict__ d_partial_output,
+    float* __restrict__ d_partial_max,
+    float* __restrict__ d_partial_weight_sum,
+    const uint query_group_size,
+    const uint head_dim,
+    const uint kv_cache_len,
+    const uint kv_stride,
+    const float rsqrt_head_dim,
+    const uint num_kv_chunks
+){
+    const uint head_id = blockIdx.x;
+    const uint kv_chunk_id = blockIdx.y;
+    const uint kv_head_id = head_id / query_group_size;
+    const uint kv_start_token_id = kv_chunk_id * KV_CHUNK;
+    const uint kv_end_token_id = min(kv_start_token_id + KV_CHUNK, kv_cache_len);
+
+    __shared__ float warp_sums[BLOCK_SIZE / 32];
+    __shared__ float chunk_scores[KV_CHUNK];
+
+    const uint warp_id = threadIdx.x / 32;
+    const uint lane_id = threadIdx.x % 32;
+    const __half* q_head = d_q + head_id * head_dim;
+   
+
+    // Four warps compute four token scores concurrently. The last chunk can
+    // be partial, so each warp checks its token before reading K.
+    for (uint token_base = kv_start_token_id; token_base < kv_end_token_id; token_base += 4) {
+
+        const uint token_id = token_base + warp_id;
+
+        if (token_id < kv_end_token_id) {
+            const __half* k_token = d_k + token_id * kv_stride + kv_head_id * head_dim;
+            float sum = 0.f;
+
+            for (uint vec = lane_id; vec < head_dim / 8; vec += 32) {
+                sum += dot_qk_half8(q_head + vec * 8, k_token + vec * 8);
+            }
+        
+            for (uint offset = warpSize >> 1; offset > 0; offset >>= 1){
+                sum += __shfl_down(sum, offset);
+            }
+
+            if (lane_id == 0){
+                chunk_scores[token_id - kv_start_token_id] = sum * rsqrt_head_dim;
+            }
+        }
+    }
+    __syncthreads();
+
+    const uint valid_tokens = kv_end_token_id - kv_start_token_id;
+    float local_max = -INFINITY;
+    for (uint i = threadIdx.x; i < valid_tokens; i += blockDim.x){
+        local_max = fmaxf(chunk_scores[i], local_max);
+    }
+    const float max_score = block_max(local_max, warp_sums);
+
+    for (uint i = threadIdx.x; i < valid_tokens; i += blockDim.x){
+        chunk_scores[i] = expf(chunk_scores[i] - max_score);
+    }
+    __syncthreads();
+
+    float local_weight_sum = 0.f;
+    for (uint i = threadIdx.x; i < valid_tokens; i += blockDim.x){
+        local_weight_sum += chunk_scores[i];        
+    }
+    const float weight_sum = block_reduction(local_weight_sum, warp_sums);
+
+    for (uint i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        float partial_output = 0.f;
+        for (uint t = kv_start_token_id; t < kv_end_token_id; ++t) {
+            const uint global_id = t * kv_stride + kv_head_id * head_dim + i;
+            partial_output += chunk_scores[t - kv_start_token_id] * __half2float(d_v[global_id]);
+        }
+        d_partial_output[head_id * num_kv_chunks * head_dim + kv_chunk_id * head_dim + i] = partial_output;
+    }
+
+    if (threadIdx.x == 0) {
+        const size_t partial_id = head_id * num_kv_chunks + kv_chunk_id;
         d_partial_max[partial_id] = max_score;
         d_partial_weight_sum[partial_id] = weight_sum;
     }
@@ -656,19 +769,37 @@ __device__ void merge_partial_out_vectors(
 ){
     
     for(uint i = threadIdx.x; i < head_dim; i+=blockDim.x){
-        float output_sum = 0.f; 
 
-        for(uint chunk = 0; chunk < num_kv_chunks; chunk++){
-
-            // This indexes the chunk's max and weight sum
-            const uint state_id = head_id * num_kv_chunks + chunk;
-
-            // Indexes the chunk i element of the partial output vector
-            const uint output_id = state_id * head_dim + i;  
-            
-            const float scale = expf(d_partial_max[state_id] - global_max_score);
-            
-            output_sum += scale * d_partial_output[output_id]; 
+        float sum0 = 0.f;
+        float sum1 = 0.f;
+        float sum2 = 0.f;
+        float sum3 = 0.f;
+        
+        uint chunk = 0;
+        for (; chunk + 3 < num_kv_chunks; chunk += 4) {
+            const uint state0 = head_id * num_kv_chunks + chunk;
+            const uint state1 = state0 + 1;
+            const uint state2 = state0 + 2;
+            const uint state3 = state0 + 3;
+        
+            const float scale0 = expf(d_partial_max[state0] - global_max_score);
+            const float scale1 = expf(d_partial_max[state1] - global_max_score);
+            const float scale2 = expf(d_partial_max[state2] - global_max_score);
+            const float scale3 = expf(d_partial_max[state3] - global_max_score);
+        
+            sum0 += scale0 * d_partial_output[state0 * head_dim + i];
+            sum1 += scale1 * d_partial_output[state1 * head_dim + i];
+            sum2 += scale2 * d_partial_output[state2 * head_dim + i];
+            sum3 += scale3 * d_partial_output[state3 * head_dim + i];
+        }
+        
+        float output_sum = sum0 + sum1 + sum2 + sum3;
+        
+        // Handle chunks left over when num_kv_chunks isn't divisible by four.
+        for (; chunk < num_kv_chunks; ++chunk) {
+            const uint state = head_id * num_kv_chunks + chunk;
+            const float scale = expf(d_partial_max[state] - global_max_score);
+            output_sum += scale * d_partial_output[state * head_dim + i];
         }
         
         d_out[head_id * head_dim + i] = __float2half(output_sum / global_weight_sum);
@@ -773,6 +904,57 @@ void launch_causal_attention_decode(
     if(merge_node){
         *merge_node = last_captured_node(stream);
     }
+}
+
+void launch_causal_attention_decode_vectorized(
+    const __half* d_q,
+    const __half* d_k_cache,
+    const __half* d_v_cache,
+    __half* d_out,
+    float* d_partial_out,
+    float* d_partial_max,
+    float* d_partial_weight_sum,
+    size_t query_len,
+    size_t kv_cache_len,
+    size_t start_pos,
+    size_t num_heads,
+    size_t num_kv_heads,
+    size_t head_dim,
+    size_t q_stride,
+    size_t kv_stride,
+    hipStream_t stream,
+    hipGraphNode_t* attention_node,
+    hipGraphNode_t* merge_node
+){
+    (void)start_pos; // Decode attention uses the valid cache length directly.
+    (void)q_stride; // Decode Q is one packed [num_heads, head_dim] vector.
+    if (query_len == 0 || kv_cache_len == 0 || num_kv_heads == 0 || head_dim == 0) return;
+    if (num_heads % num_kv_heads != 0) return;
+
+    const size_t query_group_size = num_heads / num_kv_heads;
+    const size_t kv_row_stride = kv_stride ? kv_stride : num_kv_heads * head_dim;
+    const size_t num_kv_chunks = (kv_cache_len + KV_CHUNK - 1) / KV_CHUNK;
+    const float rsqrt_head_dim = static_cast<float>(rsqrtf(head_dim));
+    const dim3 grid(static_cast<uint>(num_heads), static_cast<uint>(num_kv_chunks), 1);
+    constexpr dim3 block_dim(BLOCK_SIZE);
+
+    causal_attention_decode_vectorized<<<grid, block_dim, 0, stream>>>(
+        d_q, d_k_cache, d_v_cache, d_partial_out, d_partial_max,
+        d_partial_weight_sum, static_cast<uint>(query_group_size),
+        static_cast<uint>(head_dim), static_cast<uint>(kv_cache_len),
+        static_cast<uint>(kv_row_stride), rsqrt_head_dim,
+        static_cast<uint>(num_kv_chunks));
+
+    if (attention_node)
+        *attention_node = last_captured_node(stream);
+
+    const dim3 merge_grid(static_cast<uint>(num_heads), 1, 1);
+    merge_attention_decode<<<merge_grid, block_dim, 0, stream>>>(
+        d_partial_out, d_partial_max, d_partial_weight_sum, d_out,
+        static_cast<uint>(num_kv_chunks), static_cast<uint>(head_dim));
+
+    if (merge_node)
+        *merge_node = last_captured_node(stream);
 }
 
 

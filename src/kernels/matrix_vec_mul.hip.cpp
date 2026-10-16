@@ -80,12 +80,12 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matrix_vec_mul_tuned(
     const __half* __restrict__ d_weight,
     const __half* __restrict__ d_input,
     __half* __restrict__ d_output,
-    size_t out_dim,
-    size_t in_dim,
+    uint out_dim,
+    uint in_dim,
     float beta
 ) {
-    constexpr size_t VECTOR_ELEMENTS = sizeof(float4) / sizeof(__half);
-    const size_t row = blockIdx.x;
+    constexpr uint VECTOR_ELEMENTS = sizeof(float4) / sizeof(__half);
+    const uint row = blockIdx.x;
 
     if (row >= out_dim) return;  // Uniform across the block, before any barrier.
 
@@ -110,7 +110,11 @@ __global__ __launch_bounds__(BLOCK_SIZE) void matrix_vec_mul_tuned(
         }
     }
     #pragma unroll
-    for (uint j = 0; j < VECTOR_ELEMENTS; ++j) sum += accumulators[j];
+    for (uint j = 0; j < VECTOR_ELEMENTS; ++j){
+        sum += accumulators[j];
+    }
+
+    
     for (uint col = vectors * VECTOR_ELEMENTS + threadIdx.x; col < in_dim; col += blockDim.x){
             sum += __half2float(weights[col]) * __half2float(d_input[col]);
     }

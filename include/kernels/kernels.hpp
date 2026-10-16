@@ -98,7 +98,9 @@ void launch_causal_attention_prefill(
     size_t kv_stride = 0  // Elements between tokens; 0 means packed K/V.
 );
 
-#define KV_CHUNK 4 // tokens per block
+
+
+#define KV_CHUNK 12 // tokens per block
 void launch_causal_attention_decode(
     const __half* d_q,              // [1, num_heads, head_dim]
     const __half* d_k_cache,        // [kv_cache_len, num_kv_heads, head_dim]
@@ -120,10 +122,47 @@ void launch_causal_attention_decode(
     hipGraphNode_t* merge_node = nullptr
 );
 
+// Experimental vector-load path for decode attention, with graph node handles
+// compatible with update_causal_attention_decode_node/update_merge... below.
+void launch_causal_attention_decode_vectorized(
+    const __half* d_q,
+    const __half* d_k_cache,
+    const __half* d_v_cache,
+    __half* d_out,
+    float* d_partial_out,
+    float* d_partial_max,
+    float* d_partial_weight_sum,
+    size_t query_len,
+    size_t kv_cache_len,
+    size_t start_pos,
+    size_t num_heads,
+    size_t num_kv_heads,
+    size_t head_dim,
+    size_t q_stride = 0,
+    size_t kv_stride = 0,
+    hipStream_t stream = nullptr,
+    hipGraphNode_t* attention_node = nullptr,
+    hipGraphNode_t* merge_node = nullptr
+);
+
 void update_merge_attention_decode_node(
     hipGraphExec_t graph_exec,
     hipGraphNode_t node,
     size_t kv_cache_len
+);
+
+// Experimental merge variant that maps warps across chunks and lanes across
+// output dimensions. Use in an isolated comparison; decode still uses the
+// default merge kernel unless explicitly wired to this launcher.
+void launch_merge_attention_decode_tiled(
+    const float* d_partial_output,
+    const float* d_partial_max,
+    const float* d_partial_weight_sum,
+    __half* d_out,
+    size_t num_heads,
+    size_t num_kv_chunks,
+    size_t head_dim,
+    hipStream_t stream = nullptr
 );
 
 void launch_attention_out_projection(
@@ -244,6 +283,16 @@ void launch_argmax(const __half *d_logits, int* d_best_token_id, size_t vocab_si
 // y: [out_dim]
 // y = W * x + beta * y
 void launch_matrix_vector_mul(
+    const __half* d_weight,
+    const __half* d_input,
+    __half* d_output,
+    size_t out_dim,
+    size_t in_dim,
+    float beta = 0.0f,
+    hipStream_t stream = nullptr
+);
+
+void launch_matrix_vector_mul_persistent(
     const __half* d_weight,
     const __half* d_input,
     __half* d_output,

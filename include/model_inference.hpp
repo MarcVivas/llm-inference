@@ -371,7 +371,7 @@ class ModelInference{
     
             {
                 profiling::Range range("FlashDecode");
-                launch_causal_attention_decode(
+                launch_causal_attention_decode_vectorized(
                     d_scratch_a,
                     kv_cache.get_k_cache(layer_idx),
                     kv_cache.get_v_cache(layer_idx),

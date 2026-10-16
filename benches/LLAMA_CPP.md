@@ -17,6 +17,15 @@ all layers on GPU, and FP16 K/V cache. Check `benches/llama_server.log` for the
 actual backend and offload count.
 Combined results are saved to `benches/comparison.json`.
 
+PyTorch eager and `torch.compile` results are cached in
+`benches/pytorch_cache.json`. A matching run reuses them and skips loading the
+PyTorch model and compiling it; the custom HIP benchmark still runs. The cache
+key includes the model revision, exact prompt token IDs, generation/repeat
+settings, framework versions, compile settings, and device-selection
+environment. Use `--refresh-pytorch-cache` to rerun and replace the matching
+entry, or `--no-pytorch-cache` to bypass caching. Set `--pytorch-cache PATH`
+to choose another cache file.
+
 All engines receive the same prompt token IDs, generate the same fixed number
 of tokens, and use greedy sampling. llama.cpp disables prompt reuse between
 requests and ignores EOS. Its reported timings are client wall clock: time to

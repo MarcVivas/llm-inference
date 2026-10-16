@@ -6,8 +6,10 @@ All engines use a KV cache. Optional llama.cpp timings include HTTP streaming.
 """
 import argparse
 import gc
+import hashlib
 import inspect
 import json
+import os
 from pathlib import Path
 import statistics
 import subprocess
@@ -20,6 +22,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 DEFAULT_CPP_JSON = Path(__file__).resolve().parent / "cpp_bench.json"
+DEFAULT_PYTORCH_CACHE = Path(__file__).resolve().parent / "pytorch_cache.json"
+CACHE_VERSION = 1
 
 
 def positive_int(value):
@@ -43,6 +47,12 @@ def parse_arguments():
     parser.add_argument("--llama-server", default="./build/llama-hip/bin/llama-server")
     parser.add_argument("--llama-port", type=positive_int, default=8080)
     parser.add_argument("--pytorch-output", help=argparse.SUPPRESS)
+    parser.add_argument("--pytorch-cache", default=str(DEFAULT_PYTORCH_CACHE),
+                        help="JSON cache for PyTorch eager/compile results")
+    parser.add_argument("--refresh-pytorch-cache", action="store_true",
+                        help="rerun PyTorch even when a matching cached result exists")
+    parser.add_argument("--no-pytorch-cache", action="store_true",
+                        help="do not read or write cached PyTorch results")
     return parser.parse_args()
 
 
@@ -53,6 +63,77 @@ def format_chat_prompt(tokenizer, user_text):
             add_generation_prompt=True,
         )
     return f"<|im_start|>user\n{user_text}<|im_end|>\n<|im_start|>assistant\n"
+
+
+def prepare_prompt(tokenizer, prompt_text):
+    prompt = format_chat_prompt(tokenizer, prompt_text)
+    inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
+    return inputs.input_ids[0].tolist()
+
+
+def model_cache_identity(model_name, tokenizer):
+    model_path = Path(model_name).expanduser()
+    if model_path.is_dir():
+        # For local models, file metadata invalidates the cache when weights or
+        # tokenizer/config files are replaced without reading multi-GB weights.
+        files = []
+        for path in model_path.rglob("*"):
+            if path.is_file():
+                stat = path.stat()
+                files.append((str(path.relative_to(model_path)), stat.st_size, stat.st_mtime_ns))
+        revision = hashlib.sha256(json.dumps(sorted(files), separators=(",", ":")).encode()).hexdigest()
+        return {"path": str(model_path.resolve()), "revision": revision}
+
+    init_kwargs = getattr(tokenizer, "init_kwargs", {})
+    return {
+        "name": model_name,
+        "revision": init_kwargs.get("_commit_hash"),
+    }
+
+
+def pytorch_cache_metadata(args, token_ids, tokenizer):
+    return {
+        "cache_version": CACHE_VERSION,
+        "model": model_cache_identity(args.model, tokenizer),
+        "prompt_token_ids": token_ids,
+        "max_tokens": args.max_tokens,
+        "repeats": args.repeats,
+        "warmups": args.warmups,
+        "dtype": "float16",
+        "compile": {"dynamic": True, "triton_cudagraphs": False},
+        "torch": torch.__version__,
+        "transformers": __import__("transformers").__version__,
+        # Include device-selection overrides without initializing a GPU context
+        # in the parent, which must release all accelerator memory before HIP runs.
+        "device_selection": {name: os.environ.get(name) for name in (
+            "CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES")},
+    }
+
+
+def read_pytorch_cache(cache_path):
+    try:
+        cache = json.loads(cache_path.read_text())
+        if cache.get("version") == CACHE_VERSION and isinstance(cache.get("entries"), dict):
+            return cache
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {"version": CACHE_VERSION, "entries": {}}
+
+
+def write_pytorch_cache(cache_path, cache):
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=cache_path.parent,
+                                         prefix=cache_path.name + ".", suffix=".tmp",
+                                         delete=False) as output:
+            temp_path = Path(output.name)
+            json.dump(cache, output, indent=2)
+            output.write("\n")
+        os.replace(temp_path, cache_path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
 
 
 @torch.inference_mode()
@@ -236,7 +317,8 @@ def run_pytorch_benchmarks(args):
         model.forward, dynamic=True, options={"triton.cudagraphs": False},
     )
     compiled = benchmark(compiled_forward, inputs, args, "torch.compile")
-    del compiled_forward, model, inputs
+    del compiled_forward
+    del model, inputs
 
     torch.compiler.reset()
     gc.collect()
@@ -250,6 +332,7 @@ def main():
     args = parse_arguments()
     if args.llama_gguf and args.llama_url:
         raise ValueError("Use either --llama-gguf or --llama-url")
+
     if args.pytorch_output:
         eager, compiled, token_ids = run_pytorch_benchmarks(args)
         Path(args.pytorch_output).write_text(json.dumps({
@@ -257,15 +340,49 @@ def main():
         }))
         return
 
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    token_ids = prepare_prompt(tokenizer, args.prompt)
+    metadata = pytorch_cache_metadata(args, token_ids, tokenizer)
+    cache_key = hashlib.sha256(
+        json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    cache_path = Path(args.pytorch_cache).expanduser()
+    cache = read_pytorch_cache(cache_path) if not args.no_pytorch_cache else None
+
+    cached = None
+    if cache is not None and not args.refresh_pytorch_cache:
+        entry = cache["entries"].get(cache_key)
+        if isinstance(entry, dict) and entry.get("metadata") == metadata:
+            cached = entry.get("results")
+
+    if not isinstance(cached, dict) or not isinstance(cached.get("eager"), dict) or not isinstance(cached.get("compiled"), dict):
+        cached = None
+
     # Process exit releases all PyTorch/Inductor device allocations before
     # benchmarking the independent engines, including allocations retained
     # beyond empty_cache() and compiler.reset().
-    with tempfile.TemporaryDirectory(prefix="llm-pytorch-benchmark-") as directory:
-        result_path = Path(directory) / "results.json"
-        subprocess.run([sys.executable, "-u", str(Path(__file__).resolve()),
-                        *sys.argv[1:], "--pytorch-output", str(result_path)], check=True)
-        results = json.loads(result_path.read_text())
-    eager, compiled, token_ids = results["eager"], results["compiled"], results["input_token_ids"]
+    if cached is not None:
+        print(f"[PyTorch cache] Reusing eager/compile results ({cache_path})")
+        eager, compiled = cached["eager"], cached["compiled"]
+    else:
+        print("[PyTorch cache] No matching entry; running PyTorch eager and compile")
+        with tempfile.TemporaryDirectory(prefix="llm-pytorch-benchmark-") as directory:
+            result_path = Path(directory) / "results.json"
+            subprocess.run([sys.executable, "-u", str(Path(__file__).resolve()),
+                            *sys.argv[1:], "--pytorch-output", str(result_path)], check=True)
+            results = json.loads(result_path.read_text())
+        eager, compiled = results["eager"], results["compiled"]
+        if results["input_token_ids"] != token_ids:
+            raise RuntimeError("PyTorch subprocess tokenized a different prompt")
+
+        if cache is not None:
+            cache["entries"][cache_key] = {"metadata": metadata,
+                                           "results": {"eager": eager, "compiled": compiled}}
+            write_pytorch_cache(cache_path, cache)
+
+    for label, result in (("PyTorch eager", eager), ("torch.compile", compiled)):
+        if result.get("prompt_tokens") != len(token_ids) or result.get("generated_tokens") != args.max_tokens:
+            raise RuntimeError(f"Cached {label} result does not match the requested workload")
 
     cpp = run_cpp_benchmark(args, token_ids)
 
