@@ -4,9 +4,6 @@
 #include "kernels/kernels.hpp"
 #include "gpu_utils.hpp"
 
-static constexpr size_t BLOCK_SIZE = 512;
-
-
 void launch_qkv_gemm(
     const __half* d_input_norm,
     __half* d_qkv_out,

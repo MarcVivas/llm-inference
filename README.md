@@ -1,158 +1,129 @@
-# qwen-hip
+# SmolLM 3B inference on AMD Radeon RX 6800 XT
 
-A minimal C++ and HIP inference engine for the Qwen2.5 architecture running natively on AMD RDNA 2 GPUs (Radeon RX 6800 XT). 
+A from-scratch C++23 inference engine for **HuggingFaceTB/SmolLM3-3B**, optimized for an AMD Radeon RX 6800 XT (`gfx1030`). It runs FP16 weights and activations through custom HIP kernels and rocBLAS, with a KV-cached decode path designed to keep single-token generation fast.
 
-The goal of this project is to implement the autoregressive transformer pipeline from scratch without high-level runtime engines, evaluate operator performance on AMD hardware, and verify numerical correctness against a PyTorch reference implementation.
+## Contents
 
-## Implementation Details
+- [Performance](#performance)
+- [Implementation](#implementation)
+- [Key optimization decisions](#key-optimization-decisions)
+- [Build and run](#build-and-run)
+- [Reproduce the comparison](#reproduce-the-comparison)
+- [Profile](#profile)
 
-### Operator Support
-* **Attention**: Grouped-Query Attention (GQA) with an explicit pre-allocated KV-cache to avoid recomputation during decode.
-* **Embeddings**: Rotary Positional Embeddings (RoPE) applied to Q and K projections before computing attention scores.
-* **Normalization**: Fused RMSNorm combining sum-of-squares reduction, root-mean-square calculation, and weight scaling into a single kernel pass.
-* **Feed-Forward**: Gated SwiGLU MLP ($W_{\text{gate}}$, $W_{\text{up}}$, $W_{\text{down}}$).
+## Performance
 
-### Hardware Targeting (AMD RDNA 2 / RX 6800 XT)
-The RX 6800 XT (Navi 21 architecture) has 72 Compute Units and lacks native Bfloat16 hardware execution units. Running BF16 directly incurs an instruction emulation penalty. 
+One recorded run with a 254-token prompt and 64 generated tokens:
 
-To maximize throughput, the loader casts incoming weights and activations to IEEE 754 half-precision (`__half2`). This utilizes RDNA 2's packed FP16 ALUs, which execute at dual-issue rate (twice the throughput of single-precision FP32).
-
-## Architecture Pipeline
-
-```mermaid
-flowchart TD
-    In[Input Tokens] --> Emb[Token Embedding Lookup]
-    
-    subgraph Layer ["Transformer Layer (x N)"]
-        Emb --> Norm1[RMSNorm]
-        Norm1 --> QKV[QKV Projection GEMM]
-        QKV --> RoPE[RoPE Rotation]
-        RoPE --> Attn[GQA Scaled Dot-Product]
-        Attn --> KV[(KV Cache Buffer)]
-        Attn --> OutProj[Output Projection GEMM]
-        OutProj --> Res1[Residual Add]
-        
-        Res1 --> Norm2[Post-Attention RMSNorm]
-        Norm2 --> FFN[SwiGLU: Gate & Up Projections]
-        FFN --> DownProj[Down Projection GEMM]
-        DownProj --> Res2[Residual Add]
-    end
-    
-    Res2 --> FinalNorm[Final RMSNorm]
-    FinalNorm --> Logits[LM Head Unembedding GEMM]
-    Logits --> Sample[Sampling / Argmax]
-    Sample -->|Next Token| Emb
-```
-
-## Benchmarks
-
-Measurements taken on an AMD Radeon RX 6800 XT (16 GB VRAM, 512 GB/s peak bandwidth) on Linux via ROCm 6.x.  
-Timing is measured using `hipEventElapsedTime` to exclude host-device synchronization latency.  
-Workload: 512 input tokens, 256 generated tokens, Batch Size = 1.
-
-### Decode Generation Speed
+| Engine | Prefill (tok/s) | Decode after first token (tok/s) |
+| --- | ---: | ---: |
+| Custom C++ HIP, RX 6800 XT | 1,767 | **70.1** |
+| llama.cpp HIP, RX 6800 XT | **1,825** | 64.6 |
+| PyTorch `torch.compile` | 1,017 | 25.5 |
+| PyTorch eager | 985 | 22.2 |
 
 ```mermaid
 xychart-beta
-    title "Decode Throughput (Tokens / Second) - Higher is Better"
-    x-axis ["PyTorch Eager", "PyTorch (torch.compile)", "Custom HIP (FP16)"]
-    y-axis "TPS" 0 --> 100
-    bar [31, 46, 74]
+    title "Prefill throughput (254-token prompt)"
+    x-axis ["HIP", "llama.cpp", "torch.compile", "PyTorch"]
+    y-axis "tokens/s" 0 --> 2000
+    bar [1767, 1825, 1017, 985]
 ```
-
-### Prefill Latency (Time to First Token)
 
 ```mermaid
 xychart-beta
-    title "Prefill Latency / TTFT (ms) - Lower is Better"
-    x-axis ["PyTorch Eager", "PyTorch (torch.compile)", "Custom HIP (FP16)"]
-    y-axis "Latency (ms)" 0 --> 300
-    bar [240, 160, 115]
+    title "Decode throughput (64 generated tokens)"
+    x-axis ["HIP", "llama.cpp", "torch.compile", "PyTorch"]
+    y-axis "tokens/s" 0 --> 75
+    bar [70.1, 64.6, 25.5, 22.2]
 ```
 
-## Directory Structure
+The custom engine's decode result is about **2.75× `torch.compile`** and **1.09× llama.cpp** in these saved runs. The PyTorch and custom results come from the same comparison run; the llama.cpp result is a separate capture with the same model and token counts. Its timing is client wall-clock over HTTP streaming, so it includes server and transport overhead. Treat these as representative measurements, not a multi-run statistical comparison: each saved run used one warmup and one measured repetition.
 
-```text
-.
-├── benches/                # Inference benchmarks using wall-clock timing
-├── include/
-│   ├── gpu_utils.hpp       # HIP error checking, memory allocators, timing macros
-│   ├── model_config.hpp    # Parses hyperparameter shapes from config.json
-│   └── kernels/
-│       └── kernels.hpp     # Declarations for all HIP device functions
-├── python/
-│   ├── reference.py        # PyTorch reference model and intermediate tensor dumper
-│   └── export_weights.py   # Extracts and formats weights from .safetensors files
-├── src/
-│   ├── main.cpp            # Context management, prompt ingestion, and decode loop
-│   └── kernels/
-│       └── kernels.hip.cpp # Custom HIP kernels (RMSNorm, RoPE, Attention, GEMM)
-├── tests/                  # Layer-by-layer parity tests against PyTorch outputs
-└── xmake.lua               # Build script
+Profiling the optimized GEMV path showed roughly **500 GB/s observed weight-read bandwidth**. AMD specifies up to **512 GB/s** of memory bandwidth for the RX 6800 XT, so this is approximately **98% of the card's nominal GDDR6 bandwidth** for those GEMV reads ([AMD specifications](https://www.amd.com/content/dam/amd/en/documents/partner-hub/radeon/amd-radeon-rx-6000-series-quick-reference-competitive.pdf)). This is an approximate roofline comparison for the GEMV kernels, not a claim that the full model or GPU sustains 98% utilization. The benchmark and llama.cpp setup are documented in [benches/LLAMA_CPP.md](benches/LLAMA_CPP.md); saved measurements are in [benches/comparison.json](benches/comparison.json), [benches/cpp_bench.json](benches/cpp_bench.json), and [benches/llama_bench.json](benches/llama_bench.json).
+
+```mermaid
+xychart-beta
+    title "GEMV weight-read bandwidth vs RX 6800 XT peak"
+    x-axis ["Observed GEMV", "Nominal GDDR6 peak"]
+    y-axis "GB/s" 0 --> 550
+    bar [500, 512]
 ```
 
-## Build Instructions
+## Implementation
 
-### Requirements
-* Linux x86_64
-* ROCm 6.0+ (`hipcc`)
-* xmake
-* Python 3.10+ (`torch`, `safetensors`)
+- Custom HIP kernels for RMSNorm, RoPE and KV-cache writes, grouped-query attention, SwiGLU, embeddings, argmax, and vectorized decode GEMV projections.
+- rocBLAS matrix multiplications for prefill; custom matrix-vector kernels for single-token decode, including fused Gate/Up plus SwiGLU.
+- Chunked Flash-Decode attention with partial-result merging and HIP graph replay for the decode layer stack.
+- FP16 KV cache, interactive chat executable, GPU kernel tests, and a benchmark harness for PyTorch eager, `torch.compile`, the custom engine, and llama.cpp.
 
-### 1. Export Weights and Test Tensors
-```bash
-cd python
-pip install -r requirements.txt
-
-# Generate intermediate activation dumps for kernel testing
-python reference.py --model empero-ai/Qwen3.8-4B --dump-activations
-
-# Convert weights from safetensors into a flat binary format
-python export_weights.py --model empero-ai/Qwen3.8-4B --output ../weights.bin
-cd ..
+```mermaid
+flowchart LR
+    A[SmolLM 3B FP16 checkpoint] --> B[Prefill: rocBLAS projections]
+    B --> C[RoPE and KV-cache write]
+    C --> D[Decode: vectorized GEMV]
+    D --> E[Flash-Decode attention]
+    E --> F[HIP graph layer stack]
+    F --> G[Logits and sampling]
+    G --> H[Next token]
+    H --> D
 ```
 
-### 2. Compile Engine
+## Key optimization decisions
+
+**Use GEMM for prefill and GEMV for decode.** Prefill processes many prompt tokens together, so rocBLAS GEMMs reuse weights across rows of activations. Decode processes one new token at a time; custom GEMVs avoid treating that single vector as a larger matrix operation. The decode path applies GEMV to QKV, attention output, MLP projections, and the LM head.
+
+**Cache keys and values.** Prefill writes each layer's K/V tensors into an FP16 cache. Each decode step computes and appends K/V only for the new token, then attends over the existing cache instead of projecting the entire history again.
+
+**Parallelize attention over long contexts.** Flash-Decode divides the cached context into chunks, computes partial attention results independently, then merges their softmax state and output. This exposes more parallel work for a single query token.
+
+**Reduce decode memory and launch overhead.** Vectorized GEMV loads weight data in wide transactions and accumulates in FP32. Gate and Up projections are fused with SwiGLU to avoid materializing and rereading the full gate/up activation. HIP graph replay captures the layer stack to reduce host dispatch overhead; its performance is measured separately because graph replay did not improve every tested workload.
+
+## Build and run
+
+Requirements: Linux, an AMD GPU supported by the installed ROCm version, ROCm/HIP with rocBLAS, xmake, a C++23-capable compiler, and Cargo for the tokenizer wrapper.
+
 ```bash
 xmake f -m release
-xmake
+xmake build llm_engine benchmark_engine test_kernels
 ```
 
-### 3. Run Validation Suite
-Verifies that each HIP kernel's output matches the PyTorch reference values within an absolute error tolerance ($\epsilon < 10^{-4}$):
-```bash
-xmake run test_kernels
-```
-
-### 4. Run Inference
-```bash
-# Run interactive generation
-xmake run qwen_infer --weights weights.bin --prompt "Write an LRU cache in C++" --max-tokens 256
-```
-### 5. Run benchmark
-```bash
-# Run performance benchmark suite
-xmake build benchmark_engine
-python3 benches/benchmark.py --model Qwen/Qwen2.5-3B
-```
-Use the same model checkpoint that was exported to `weights.bin`. The benchmark
-passes identical prompt token IDs to both engines and reports medians after full
-generation warmup (`--repeats 3 --warmups 1` by default). It generates exactly
-`--max-tokens` tokens, ignoring EOS for timing. The first token is timed separately;
-the remaining tokens are reported as generation throughput. PyTorch uses a KV
-cache, while C++ currently recomputes the full growing context on each step.
-The compiled path uses Inductor with dynamic shapes; graph replay is disabled
-because the dynamic KV cache retains tensors between forward calls.
-
-The C++ harness also accepts token IDs directly as a JSON array:
+Export the Hugging Face checkpoint into the engine's packed FP16 format:
 
 ```bash
-build/linux/x86_64/release/benchmark_engine weights.bin 128 results.json tokens.json 3 1
+python3 -m venv .venv
+.venv/bin/pip install -r python/requirements.txt
+.venv/bin/python python/export_weights.py \
+  --model HuggingFaceTB/SmolLM3-3B --output weights.bin
 ```
-## Profiling
 
-Generate execution traces and hardware metrics for inspection in Radeon GPU Profiler (RGP):
+Start chat or run the model and kernel validation suite:
 
 ```bash
-rocprof --sys-trace --hip-trace -d ./profiler_out xmake run qwen_infer --weights weights.bin
+xmake run llm_engine "$PWD/weights.bin"
+xmake run test_kernels "$PWD/weights.bin"
 ```
+
+## Reproduce the comparison
+
+```bash
+.venv/bin/python benches/benchmark.py \
+  --model HuggingFaceTB/SmolLM3-3B \
+  --weights weights.bin \
+  --max-tokens 64 \
+  --llama-gguf benches/SmolLM3-3B-F16.gguf
+```
+
+The harness uses shared prompt token IDs and greedy sampling. PyTorch eager and compiled results are cached by model, prompt, settings, and device environment; use `--refresh-pytorch-cache` to rerun them. The custom and llama.cpp runs are executed separately so each can release its GPU allocations before the next engine starts. See [benches/LLAMA_CPP.md](benches/LLAMA_CPP.md) for llama.cpp build and timing details.
+
+## Profile
+
+```bash
+/opt/rocm/bin/rocprofv3 \
+  --kernel-trace --hip-trace --marker-trace --stats --output-format csv pftrace \
+  --output-directory /tmp/llm-profile \
+  -- ./build/linux/x86_64/release/benchmark_engine \
+  weights.bin 64 /tmp/llm-profile-results.json benches/profile_tokens.json 1 1
+```
+
+Omit `--kernel-rename` when profiling graph replay to preserve actual kernel symbols. rocprof2 counter availability varies across GPUs and counter blocks.

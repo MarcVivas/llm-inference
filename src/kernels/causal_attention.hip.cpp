@@ -434,18 +434,18 @@ void launch_causal_attention_prefill(
         d_k_cache,
         d_v_cache,
         d_out,
-        num_heads,
-        head_dim,
-        query_group_size,
-        query_len,
-        kv_cache_len,
-        start_pos,
-        q_tile_elements,
-        query_row_stride,
-        num_kv_tiles,
-        kv_tile_elements,
-        kv_row_stride,
-        num_kv_heads,
+        static_cast<uint>(num_heads),
+        static_cast<uint>(head_dim),
+        static_cast<uint>(query_group_size),
+        static_cast<uint>(query_len),
+        static_cast<uint>(kv_cache_len),
+        static_cast<uint>(start_pos),
+        static_cast<uint>(q_tile_elements),
+        static_cast<uint>(query_row_stride),
+        static_cast<uint>(num_kv_tiles),
+        static_cast<uint>(kv_tile_elements),
+        static_cast<uint>(kv_row_stride),
+        static_cast<uint>(num_kv_heads),
         rsqrt_head_dim
     );
 }
@@ -687,13 +687,25 @@ __global__ void causal_attention_decode_vectorized(
     }
     const float weight_sum = block_reduction(local_weight_sum, warp_sums);
 
-    for (uint i = threadIdx.x; i < head_dim; i += blockDim.x) {
-        float partial_output = 0.f;
+    const uint partial_output_start = head_id * num_kv_chunks * head_dim + kv_chunk_id * head_dim;
+
+    const uint num_dim_pairs = head_dim / 2;
+
+    for (uint pair_id = threadIdx.x; pair_id < num_dim_pairs; pair_id += blockDim.x) {
+        float2 partial_output = {0.0f, 0.0f};
+
         for (uint t = kv_start_token_id; t < kv_end_token_id; ++t) {
-            const uint global_id = t * kv_stride + kv_head_id * head_dim + i;
-            partial_output += chunk_scores[t - kv_start_token_id] * __half2float(d_v[global_id]);
+            const uint global_id = t * kv_stride + kv_head_id * head_dim + pair_id * 2;
+            const __half2 v_pair = reinterpret_cast<const __half2*>(d_v + global_id)[0];
+            const float2 v_values = __half22float2(v_pair);
+            const float weight = chunk_scores[t - kv_start_token_id];
+
+            partial_output.x += weight * v_values.x;
+            partial_output.y += weight * v_values.y;
         }
-        d_partial_output[head_id * num_kv_chunks * head_dim + kv_chunk_id * head_dim + i] = partial_output;
+
+        const uint output_id = partial_output_start + pair_id * 2;
+        reinterpret_cast<float2*>(d_partial_output + output_id)[0] = partial_output;
     }
 
     if (threadIdx.x == 0) {
@@ -883,12 +895,12 @@ void launch_causal_attention_decode(
         d_partial_out,
         d_partial_max,
         d_partial_weight_sum,
-        query_group_size,
-        head_dim,
-        kv_cache_len,
-        kv_row_stride,
+        static_cast<uint>(query_group_size),
+        static_cast<uint>(head_dim),
+        static_cast<uint>(kv_cache_len),
+        static_cast<uint>(kv_row_stride),
         rsqrt_head_dim,
-        num_kv_chunks
+        static_cast<uint>(num_kv_chunks)
     );
 
     if(attention_node){
@@ -898,7 +910,9 @@ void launch_causal_attention_decode(
     // One block per query head
     grid = dim3(num_heads, 1, 1);
 
-    merge_attention_decode<<<grid, block_dim, 0, stream>>>(d_partial_out, d_partial_max, d_partial_weight_sum, d_out, num_kv_chunks, head_dim);
+    merge_attention_decode<<<grid, block_dim, 0, stream>>>(
+        d_partial_out, d_partial_max, d_partial_weight_sum, d_out,
+        static_cast<uint>(num_kv_chunks), static_cast<uint>(head_dim));
 
 
     if(merge_node){

@@ -187,7 +187,11 @@ void launch_rope_and_store_kv(
     grid = (total_kv_elements + BLOCK_SIZE - 1) / BLOCK_SIZE;
     const size_t kv_dim = num_kv_heads * head_dim;
     
-    copy_to_kv_cache<<<grid, block_dim, 0, stream>>>(d_k, d_v, d_k_cache, d_v_cache, seq_len, kv_dim, k_stride, start_pos, total_k_elements, total_kv_elements);
+    copy_to_kv_cache<<<grid, block_dim, 0, stream>>>(
+        d_k, d_v, d_k_cache, d_v_cache,
+        static_cast<uint>(seq_len), static_cast<uint>(kv_dim),
+        static_cast<uint>(k_stride), static_cast<uint>(start_pos),
+        static_cast<uint>(total_k_elements), static_cast<uint>(total_kv_elements));
 
 }
 

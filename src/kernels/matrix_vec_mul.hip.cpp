@@ -1,6 +1,6 @@
 #include "kernels/kernels.hpp"
 
-#define BLOCK_SIZE 256
+#define BLOCK_SIZE 512
 #define WARP_SIZE 32
 
 
@@ -166,6 +166,7 @@ void launch_matrix_vector_mul(
     const dim3 blocks(BLOCK_SIZE);
     
     matrix_vec_mul_tuned<<<grid, blocks, 0, stream>>>(
-        d_weight, d_input, d_output, out_dim, in_dim, beta
+        d_weight, d_input, d_output,
+        static_cast<uint>(out_dim), static_cast<uint>(in_dim), beta
     );
 }

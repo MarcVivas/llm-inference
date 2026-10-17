@@ -79,7 +79,7 @@ void launch_gate_up_decode(
 // silu(gate) * up in registers, and directly writes the intermediate_size output.
 // ---------------------------------------------------------------------------
 
-#define BLOCK_SIZE_SWIGLU 256
+#define BLOCK_SIZE_SWIGLU 1024
 #define WARP_SIZE_SWIGLU 32
 
 __device__ inline float silu_f(float x) {

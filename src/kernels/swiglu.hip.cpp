@@ -93,7 +93,9 @@ void launch_swiglu(
     const dim3 grid((total_elements + BLOCK_SIZE - 1) / BLOCK_SIZE); 
     const dim3 block(BLOCK_SIZE);
     
-    swiglu<<<grid, block, 0, stream>>>(d_gate_up, d_out, total_elements, intermediate_size);
+    swiglu<<<grid, block, 0, stream>>>(
+        d_gate_up, d_out, static_cast<uint>(total_elements),
+        static_cast<uint>(intermediate_size));
 }
 
 
@@ -111,5 +113,7 @@ void launch_swiglu_vectorized(
     const dim3 grid((total_vec_elements + BLOCK_SIZE - 1) / BLOCK_SIZE); 
     const dim3 block(BLOCK_SIZE);
     
-    swiglu_vectorized<<<grid, block, 0, stream>>>(d_gate_up, d_out, total_vec_elements, intermediate_size_vec);
+    swiglu_vectorized<<<grid, block, 0, stream>>>(
+        d_gate_up, d_out, static_cast<uint>(total_vec_elements),
+        static_cast<uint>(intermediate_size_vec));
 }

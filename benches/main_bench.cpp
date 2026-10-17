@@ -88,7 +88,7 @@ int main(int argc, char* argv[]) {
         const double generation_ms = median(generation_times);
 
         nlohmann::json result = {
-            {"engine", "cpp_hip"}, {"uses_kv_cache", false},
+            {"engine", "cpp_hip"}, {"uses_kv_cache", true},
             {"prompt_tokens", tokens.size()}, {"input_token_ids", tokens},
             {"generated_tokens", last.generated.size()}, {"generated_token_ids", last.generated},
             {"repeats", repeats}, {"warmups", warmups},
